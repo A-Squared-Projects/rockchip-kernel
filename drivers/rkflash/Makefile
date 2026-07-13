@@ -8,6 +8,12 @@ obj-$(CONFIG_RK_SFC_NOR_MTD) += sfc_nor_mtd.o
 
 obj-$(CONFIG_RK_SFTL) += rksftl.o
 
+# The prebuilt ARM SFTL blobs call __gnu_mcount_nc (-pg); satisfy the
+# reference with a no-op stub when the function tracer is disabled.
+ifndef CONFIG_FUNCTION_TRACER
+rksftl-$(CONFIG_ARM) += mcount_stub.o
+endif
+
 ifdef CONFIG_CC_IS_CLANG
 ifdef CONFIG_THUMB2_KERNEL
 rksftl-$(CONFIG_THUMB2_KERNEL) += rk_sftl_arm_v7_thumb.o
