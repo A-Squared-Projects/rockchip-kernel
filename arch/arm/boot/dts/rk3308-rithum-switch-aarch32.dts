@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Rithum Switch (rs): 256MB RAM, no Ethernet, RS485 port unpopulated.
+ */
+
+/dts-v1/;
+
+#include "rk3308-rithum-switch.dtsi"
+
+/ {
+	model = "Rithum Switch";
+	compatible = "rithum,switch", "rockchip,rk3308";
+};

@@ -1269,6 +1269,8 @@ dtb-$(CONFIG_ARCH_ROCKCHIP) += \
 	rk3308bs-evb-dmic-pdm-v11-aarch32.dtb \
 	rk3308bs-evb-mipi-display-v11-aarch32.dtb \
 	rk3308hs-voice-module-board-v10-aarch32.dtb \
+	rk3308-rithum-switch-aarch32.dtb \
+	rk3308-rithum-switch-pro-aarch32.dtb \
 	rk3502g-evb1-v10.dtb \
 	rk3503g-evb1-v10.dtb \
 	rk3506b-evb1-v10.dtb \

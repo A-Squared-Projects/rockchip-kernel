@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Rithum Switch Pro (rsp): 512MB RAM, USB RTL8152 Ethernet, RS485 on
+ * uart0, audio populated.
+ */
+
+/dts-v1/;
+
+#include "rk3308-rithum-switch.dtsi"
+
+/ {
+	model = "Rithum Switch Pro";
+	compatible = "rithum,switch-pro", "rockchip,rk3308";
+};
+
+/* RS485 data port (misc power gpio handled by the application). */
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_xfer>;
+	status = "okay";
+};
+
+/*
+ * The Ethernet path (USB hub + RTL8152) shares the vbus_host enable;
+ * rmii_drv holds the refclk pin down alongside it, as on the factory
+ * DTB.
+ */
+&vbus_host {
+	pinctrl-0 = <&usb_drv &rmii_drv>;
+};
+
+/* Panel power rail pin, present on the Pro only. */
+&panel {
+	pinctrl-names = "default";
+	pinctrl-0 = <&lcd_pwr>;
+};
+
+&pinctrl {
+	rmii {
+		rmii_drv: rmii-drv {
+			rockchip,pins =
+				<0 RK_PC2 RK_FUNC_GPIO &pcfg_pull_down>;
+		};
+	};
+
+	spi-panel {
+		lcd_pwr: lcd-pwr {
+			rockchip,pins =
+				<3 RK_PA7 RK_FUNC_GPIO &pcfg_pull_down>;
+		};
+	};
+};
