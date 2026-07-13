@@ -230,8 +230,31 @@
 	rockchip,loopback-grp = <2>;
 };
 
+/*
+ * The rk3308-pcm playback card (node "bluetooth-sound") is told to wait
+ * for the VAD card (index 0) to be "locked" via rockchip,wait-card-locked.
+ * On the 6.1 multicodecs driver the VAD card registers but never enters
+ * the locked state, so the pcm card - which the app opens for playback -
+ * defers forever. It shares no codec with the VAD/acodec path (it is
+ * i2s_2ch_0 + dummy_codec), so drop the wait and let it register on its
+ * own.
+ */
+&bluetooth_sound {
+	/delete-property/ rockchip,wait-card-locked;
+};
+
 &display_subsystem {
 	status = "okay";
+};
+
+/*
+ * The dwc2 OTG port is the ADB port (device-mode to a host PC); the
+ * RTL8152 ethernet and other USB live on the EHCI/OHCI host controllers.
+ * In "otg" mode with no ID/role signal dwc2 defaults to host, so the ADB
+ * gadget never enumerates - force peripheral.
+ */
+&usb20_otg {
+	dr_mode = "peripheral";
 };
 
 &i2c1 {
