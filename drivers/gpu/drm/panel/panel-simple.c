@@ -212,6 +212,17 @@ struct panel_simple {
 	struct gpio_desc *enable_gpio;
 	struct gpio_desc *reset_gpio;
 
+	/*
+	 * Optional 3-wire 9-bit SPI command bus bit-banged over GPIOs
+	 * (rockchip,cmd-type = "spi" with spi-scl/sdi/cs-gpios), for panels
+	 * like the ST7701 whose init sequence the RK3308 drives directly off
+	 * GPIOs rather than a hardware SPI controller. Mirrors the u-boot
+	 * rockchip_panel bit-bang and the legacy 4.4 kernel.
+	 */
+	struct gpio_desc *spi_scl_gpio;
+	struct gpio_desc *spi_sdi_gpio;
+	struct gpio_desc *spi_cs_gpio;
+
 	struct edid *edid;
 
 	struct drm_display_mode override_mode;
@@ -910,6 +921,17 @@ static int panel_simple_probe(struct device *dev, const struct panel_desc *desc)
 			dev_err(dev, "failed to get reset GPIO: %d\n", err);
 		return err;
 	}
+
+	/* Bit-banged SPI command bus (idle: SCL high, CS deasserted high). */
+	panel->spi_scl_gpio = devm_gpiod_get_optional(dev, "spi-scl", GPIOD_OUT_HIGH);
+	if (IS_ERR(panel->spi_scl_gpio))
+		return PTR_ERR(panel->spi_scl_gpio);
+	panel->spi_sdi_gpio = devm_gpiod_get_optional(dev, "spi-sdi", GPIOD_OUT_HIGH);
+	if (IS_ERR(panel->spi_sdi_gpio))
+		return PTR_ERR(panel->spi_sdi_gpio);
+	panel->spi_cs_gpio = devm_gpiod_get_optional(dev, "spi-cs", GPIOD_OUT_HIGH);
+	if (IS_ERR(panel->spi_cs_gpio))
+		return PTR_ERR(panel->spi_cs_gpio);
 
 	err = of_drm_get_panel_orientation(dev->of_node, &panel->orientation);
 	if (err) {
@@ -4800,12 +4822,57 @@ static int panel_simple_of_get_desc_data(struct device *dev,
 	return 0;
 }
 
+/*
+ * Bit-bang one 9-bit word out of the 3-wire SPI command bus, MSB first,
+ * SPI mode 3 (SCL idles high, data latched on the rising edge). Bit 8 is
+ * the D/CX flag: 0 for a command byte, 1 for a data/parameter byte. This
+ * mirrors u-boot's rockchip_panel_write_spi_cmds() exactly, which is the
+ * known-good sequence for this panel; the DT declares all three GPIOs
+ * active-high so logical values here equal the physical levels u-boot drives.
+ */
+static void panel_simple_spi_gpio_write_word(struct panel_simple *p,
+					     u8 type, int value)
+{
+	int i;
+
+	gpiod_set_value(p->spi_cs_gpio, 0);
+
+	if (type == 0)
+		value &= ~(1 << 8);
+	else
+		value |= (1 << 8);
+
+	for (i = 0; i < 9; i++) {
+		gpiod_set_value(p->spi_sdi_gpio, (value & 0x100) ? 1 : 0);
+		gpiod_set_value(p->spi_scl_gpio, 0);
+		udelay(10);
+		gpiod_set_value(p->spi_scl_gpio, 1);
+		value <<= 1;
+		udelay(10);
+	}
+
+	gpiod_set_value(p->spi_cs_gpio, 1);
+}
+
+static int panel_simple_spi_gpio_write(struct device *dev, const u8 *data,
+				       size_t len, u8 type)
+{
+	struct panel_simple *p = dev_get_drvdata(dev);
+	size_t i;
+
+	for (i = 0; i < len; i++)
+		panel_simple_spi_gpio_write_word(p, type, data[i]);
+
+	return 0;
+}
+
 static int panel_simple_platform_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	const struct of_device_id *id;
 	const struct panel_desc *desc;
 	struct panel_desc *d;
+	const char *cmd_type;
 	int err;
 
 	id = of_match_node(platform_of_match, pdev->dev.of_node);
@@ -4821,6 +4888,18 @@ static int panel_simple_platform_probe(struct platform_device *pdev)
 		if (err) {
 			dev_err(dev, "failed to get desc data: %d\n", err);
 			return err;
+		}
+
+		/*
+		 * A root-level panel with rockchip,cmd-type = "spi" sends its
+		 * init/exit sequence over a GPIO-bit-banged 3-wire SPI bus
+		 * instead of a hardware SPI controller (see the write helper).
+		 */
+		if (!of_property_read_string(dev->of_node, "rockchip,cmd-type",
+					     &cmd_type) &&
+		    !strcmp(cmd_type, "spi")) {
+			d->cmd_type = CMD_TYPE_SPI;
+			d->spi_write = panel_simple_spi_gpio_write;
 		}
 	}
 
