@@ -2010,22 +2010,6 @@ int serial8250_handle_irq(struct uart_port *port, unsigned int iir)
 	}
 #endif
 
-#ifdef CONFIG_ARCH_ROCKCHIP
-	if (status & UART_LSR_BRK_ERROR_BITS) {
-
-		if (status & UART_LSR_OE)
-			pr_err("%s: Overrun error!\n", port->name);
-		if (status & UART_LSR_PE)
-			pr_err("%s: Parity error!\n", port->name);
-		if (status & UART_LSR_FE)
-			pr_err("%s: Frame error!\n", port->name);
-		if (status & UART_LSR_BI)
-			pr_err("%s: Break interrupt!\n", port->name);
-
-		pr_err("%s: maybe rx pin is low or baudrate is not correct!\n",
-			port->name);
-	}
-#endif
 	uart_unlock_and_check_sysrq_irqrestore(port, flags);
 
 	return 1;
