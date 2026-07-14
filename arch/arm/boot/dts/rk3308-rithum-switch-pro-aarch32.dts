@@ -29,10 +29,17 @@
 	pinctrl-0 = <&usb_drv &rmii_drv>;
 };
 
-/* Panel power rail pin, present on the Pro only. */
+/*
+ * Panel power rail pin, present on the Pro only. Keep the base dtsi's
+ * spi_init_cmd in the list (pinctrl-0 replaces, not extends) or the
+ * bit-bang SPI init pins (SCL/SDI/CS) are never muxed to GPIO - u-boot
+ * relies solely on this "default" state to mux them, so dropping it left
+ * u-boot unable to init the panel (no boot splash). The kernel happened to
+ * still work because it mux-on-gpio-request.
+ */
 &panel {
 	pinctrl-names = "default";
-	pinctrl-0 = <&lcd_pwr>;
+	pinctrl-0 = <&spi_init_cmd &lcd_pwr>;
 };
 
 &pinctrl {
