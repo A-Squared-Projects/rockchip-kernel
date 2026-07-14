@@ -91,7 +91,14 @@
 		spi-cs-gpios = <&gpio1 RK_PD1 GPIO_ACTIVE_HIGH>;
 		bus-format = <MEDIA_BUS_FMT_RGB666_1X18>;
 		backlight = <&backlight>;
-		enable-gpios = <&gpio3 RK_PA7 GPIO_ACTIVE_LOW>;
+		/*
+		 * enable-gpios is variant-specific and set in the per-board
+		 * .dts (Pro: gpio3 PA7, RS: gpio2 PA1) - do NOT default it here,
+		 * or one board silently drives the other's pin and its panel
+		 * never enables. The pin also needs muxing to GPIO in the panel
+		 * pinctrl-0 (u-boot doesn't mux-on-gpio-request), likewise per
+		 * board.
+		 */
 		enable-delay-ms = <20>;
 		reset-gpios = <&gpio0 RK_PC4 GPIO_ACTIVE_LOW>;
 		reset-delay-ms = <10>;

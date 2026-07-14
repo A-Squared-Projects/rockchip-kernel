@@ -40,6 +40,7 @@
 &panel {
 	pinctrl-names = "default";
 	pinctrl-0 = <&spi_init_cmd &lcd_pwr>;
+	enable-gpios = <&gpio3 RK_PA7 GPIO_ACTIVE_LOW>;
 };
 
 &pinctrl {
