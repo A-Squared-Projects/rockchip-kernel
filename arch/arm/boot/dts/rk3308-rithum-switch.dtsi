@@ -311,16 +311,24 @@
 };
 
 /*
- * SD card slot. Note the board-level pin conflict: the 4-bit data bus
- * shares gpio4-26/27 with the UART2-M1 debug console, so with a card
- * present (or in 4-bit mode once the SD controller claims the pins)
- * the serial console goes dead. Production keeps 4-bit because the
- * sdcard update feature needs it; development images may override
- * bus-width to <1> (sdmmc_bus1) to keep the console usable with the
- * slot empty. See rk3308-serial-console-writeup.md.
+ * SD card slot. Board-level pin conflict: the 4-bit data bus shares
+ * gpio4-26/27 with the UART2-M1 debug console. uart2 is disabled and the
+ * FIQ debugger inherits the preloader's M1 routing (GRF_SOC_CON5=0x194) on
+ * those pins, so in 4-bit mode the SD controller claims them at probe and
+ * the serial console dies mid-boot (right at the dwmmc probe). Run the slot
+ * in 1-bit mode (data on gpio4-24 only, via sdmmc_bus1) so the console
+ * survives.
+ *
+ * DEVELOPMENT/BENCH setting. PRODUCTION must restore bus-width = <4> with
+ * sdmmc_bus4: the sdcard-update feature needs the full data bus, and
+ * production has no serial console anyway (display + ssh/adb). To be split
+ * per-image once the kernel becomes the linux-rithum recipe. See
+ * rk3308-serial-console-writeup.md.
  */
 &sdmmc {
-	bus-width = <4>;
+	bus-width = <1>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&sdmmc_clk &sdmmc_cmd &sdmmc_det &sdmmc_bus1>;
 	status = "okay";
 };
 
