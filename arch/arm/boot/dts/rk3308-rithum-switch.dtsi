@@ -347,6 +347,33 @@
 	status = "okay";
 };
 
+/*
+ * Bluetooth: RTL8723DS over UART4 via the mainline serdev/H5 path - hci_uart
+ * + btrtl auto-attach hci0 at boot, replacing the voice-module mainboard's
+ * vendor rfkill-bt + userspace rtk_hciattach approach. The mainboard freed
+ * RTS to bit-bang it as a GPIO; restore hardware flow control here and
+ * disable the bluetooth-platdata node so it doesn't fight the serdev binding
+ * over BT_REG_ON (gpio4 PB3). GPIOs match rock-pi-s, the RK3308 RTL8723DS
+ * reference (enable PB3, host-wake PB4 identical to our vendor node).
+ */
+&uart4 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart4_xfer &uart4_cts &uart4_rts>;
+	uart-has-rtscts;
+	status = "okay";
+
+	bluetooth {
+		compatible = "realtek,rtl8723ds-bt";
+		device-wake-gpios = <&gpio4 RK_PB2 GPIO_ACTIVE_HIGH>;
+		enable-gpios = <&gpio4 RK_PB3 GPIO_ACTIVE_HIGH>;
+		host-wake-gpios = <&gpio4 RK_PB4 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&{/wireless-bluetooth} {
+	status = "disabled";
+};
+
 &pinctrl {
 	spi-panel {
 		spi_init_cmd: spi-init-cmd {
