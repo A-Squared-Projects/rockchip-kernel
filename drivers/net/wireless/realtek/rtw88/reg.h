@@ -87,6 +87,7 @@
 #define BIT_LTE_MUX_CTRL_PATH	BIT(26)
 #define REG_HCI_OPT_CTRL	0x0074
 #define BIT_USB_SUS_DIS		BIT(8)
+#define BIT_SDIO_PAD_E5		BIT(18)
 
 #define REG_AFE_CTRL_4		0x0078
 #define BIT_CK320M_AFE_EN	BIT(4)
@@ -107,7 +108,6 @@
 #define BIT_SHIFT_ROM_PGE	16
 #define BIT_FW_INIT_RDY		BIT(15)
 #define BIT_FW_DW_RDY		BIT(14)
-#define BIT_CPU_CLK_SEL		(BIT(12) | BIT(13))
 #define BIT_RPWM_TOGGLE		BIT(7)
 #define BIT_RAM_DL_SEL		BIT(7)	/* legacy only */
 #define BIT_DMEM_CHKSUM_OK	BIT(6)
@@ -125,7 +125,7 @@
 				 BIT_CHECK_SUM_OK)
 #define FW_READY_LEGACY		(BIT_MCUFWDL_RDY | BIT_FWDL_CHK_RPT |	       \
 				 BIT_WINTINI_RDY | BIT_RAM_DL_SEL)
-#define FW_READY_MASK		(0xffff & ~BIT_CPU_CLK_SEL)
+#define FW_READY_MASK		0xffff
 
 #define REG_MCU_TST_CFG		0x84
 #define VAL_FW_TRIGGER		0x1
@@ -185,6 +185,10 @@
 #define BIT_TXDMA_VIQ_MAP(x)                                                   \
 	(((x) & BIT_MASK_TXDMA_VIQ_MAP) << BIT_SHIFT_TXDMA_VIQ_MAP)
 #define REG_TXDMA_PQ_MAP	0x010C
+#define BIT_RXDMA_ARBBW_EN	BIT(0)
+#define BIT_RXSHFT_EN		BIT(1)
+#define BIT_RXDMA_AGG_EN	BIT(2)
+#define BIT_TXDMA_BW_EN		BIT(3)
 #define BIT_SHIFT_TXDMA_BEQ_MAP	8
 #define BIT_MASK_TXDMA_BEQ_MAP	0x3
 #define BIT_TXDMA_BEQ_MAP(x)                                                   \
@@ -283,10 +287,18 @@
 #define REG_H2C_TAIL		0x0248
 #define REG_H2C_READ_ADDR	0x024C
 #define REG_H2C_INFO		0x0254
+#define REG_RXDMA_AGG_PG_TH	0x0280
+#define BIT_RXDMA_AGG_PG_TH	GENMASK(7, 0)
+#define BIT_DMA_AGG_TO_V1	GENMASK(15, 8)
+#define BIT_EN_PRE_CALC		BIT(29)
 #define REG_RXPKT_NUM		0x0284
 #define BIT_RXDMA_REQ		BIT(19)
 #define BIT_RW_RELEASE		BIT(18)
 #define BIT_RXDMA_IDLE		BIT(17)
+#define REG_RXDMA_STATUS	0x0288
+#define REG_RXDMA_DPR		0x028C
+#define REG_RXDMA_MODE		0x0290
+#define BIT_DMA_MODE		BIT(1)
 #define REG_RXPKTNUM		0x02B0
 
 #define REG_INT_MIG		0x0304
@@ -366,6 +378,7 @@
 #define BIT_SIFS_BK_EN		BIT(12)
 #define REG_TXPAUSE		0x0522
 #define BIT_AC_QUEUE		GENMASK(7, 0)
+#define BIT_HIGH_QUEUE		BIT(5)
 #define REG_RD_CTRL		0x0524
 #define BIT_EDCCA_MSK_CNTDOWN_EN BIT(11)
 #define BIT_DIS_TXOP_CFE	BIT(10)
@@ -398,6 +411,7 @@
 #define REG_TCR			0x0604
 #define BIT_PWRMGT_HWDATA_EN	BIT(7)
 #define BIT_TCR_UPDATE_TIMIE	BIT(5)
+#define BIT_TCR_UPDATE_HGQMD	BIT(4)
 #define REG_RCR			0x0608
 #define BIT_APP_FCS		BIT(31)
 #define BIT_APP_MIC		BIT(30)
