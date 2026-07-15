@@ -228,16 +228,32 @@
 };
 
 /*
- * The rk3308-pcm playback card (node "bluetooth-sound") is told to wait
- * for the VAD card (index 0) to be "locked" via rockchip,wait-card-locked.
- * On the 6.1 multicodecs driver the VAD card registers but never enters
- * the locked state, so the pcm card - which the app opens for playback -
- * defers forever. It shares no codec with the VAD/acodec path (it is
- * i2s_2ch_0 + dummy_codec), so drop the wait and let it register on its
- * own.
+ * Audio topology. This board inherits the rk3308 voice-module (wake-word)
+ * sound setup, which leaves the dedicated acodec card disabled and exposes
+ * the internal codec only through a VAD card, sitting behind an inherited
+ * i2s_2ch_0 + dummy_codec "bluetooth" card at ALSA index 0 - so playback to
+ * the default card is silent (it lands on the dummy codec).
+ *
+ * The Rithum Switch uses neither VAD nor BT-audio-over-I2S (Bluetooth is
+ * BLE config/scan only). Enable the clean acodec card (speaker + mic +
+ * line-out on i2s_8ch_2 + acodec) and disable both inherited cards, so the
+ * acodec enumerates as the sole rockchip sound card at index 0. tinyalsa
+ * (tinyplay/tinymix, which always use card 0 and ignore asound.conf), ALSA
+ * default-card tools, the app and the factory test then all hit the real
+ * codec with no -D override. vad-sound is disabled rather than tweaked
+ * because it contends for the same i2s_8ch_2 + acodec that acodec_sound
+ * needs; bluetooth-sound because nothing drives i2s_2ch_0.
  */
+&acodec_sound {
+	status = "okay";
+};
+
 &bluetooth_sound {
-	/delete-property/ rockchip,wait-card-locked;
+	status = "disabled";
+};
+
+&{/vad-sound} {
+	status = "disabled";
 };
 
 &display_subsystem {
