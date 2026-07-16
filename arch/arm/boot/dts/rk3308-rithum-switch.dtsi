@@ -256,6 +256,21 @@
 	status = "disabled";
 };
 
+/*
+ * The kernel's SPDIF driver was dropped (no SPDIF output on this board), but
+ * the inherited voice-module mainboard leaves spdif_tx + its spdif-tx-sound
+ * simple-audio-card enabled, so both fail to probe ("could not get
+ * #sound-dai-cells ... probe failed -22"). Disable them to keep the boot
+ * log clean.
+ */
+&spdif_tx_sound {
+	status = "disabled";
+};
+
+&spdif_tx {
+	status = "disabled";
+};
+
 &display_subsystem {
 	status = "okay";
 };
