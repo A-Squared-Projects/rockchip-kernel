@@ -2063,7 +2063,6 @@ static s8 gtp_request_input_dev(struct i2c_client *client,
                                 struct goodix_ts_data *ts)
 {
     s8 ret = -1;
-    s8 phys[32];
 #if GTP_HAVE_TOUCH_KEY
     u8 index = 0;
 #endif
@@ -2108,9 +2107,11 @@ static s8 gtp_request_input_dev(struct i2c_client *client,
     input_set_abs_params(ts->input_dev, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
     input_set_abs_params(ts->input_dev, ABS_MT_TRACKING_ID, 0, 255, 0, 0);
 
-    sprintf(phys, "input/ts");
     ts->input_dev->name = goodix_ts_name;
-    ts->input_dev->phys = phys;
+    /* A string literal has static storage - the old local phys[32] array
+     * dangled after probe() returned, so /proc/bus/input/devices read
+     * garbage for P: Phys. */
+    ts->input_dev->phys = "input/ts";
     ts->input_dev->id.bustype = BUS_I2C;
     ts->input_dev->id.vendor = 0xDEAD;
     ts->input_dev->id.product = 0xBEEF;
