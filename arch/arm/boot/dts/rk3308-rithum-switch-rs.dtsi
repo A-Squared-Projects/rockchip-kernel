@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Rithum Switch (rs) board-specific overrides: 256MB RAM, no Ethernet,
+ * RS485 port unpopulated. #include'd by both the production and bench
+ * top-level .dts files for this variant, after rk3308-rithum-switch.dtsi
+ * and the model/compatible block.
+ */
+
+/*
+ * The RS panel enable is on gpio2 PA1 (the Pro's is gpio3 PA7); mux it to
+ * GPIO in the panel pinctrl so u-boot can drive it (u-boot doesn't
+ * mux-on-gpio-request). Matches the factory RS DTB / the .62 reference.
+ */
+&panel {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi_init_cmd &lcd_pwr>;
+	enable-gpios = <&gpio2 RK_PA1 GPIO_ACTIVE_LOW>;
+};
+
+&pinctrl {
+	spi-panel {
+		lcd_pwr: lcd-pwr {
+			rockchip,pins =
+				<2 RK_PA1 RK_FUNC_GPIO &pcfg_pull_down>;
+		};
+	};
+};

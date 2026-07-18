@@ -353,20 +353,22 @@
  * gpio4-26/27 with the UART2-M1 debug console. uart2 is disabled and the
  * FIQ debugger inherits the preloader's M1 routing (GRF_SOC_CON5=0x194) on
  * those pins, so in 4-bit mode the SD controller claims them at probe and
- * the serial console dies mid-boot (right at the dwmmc probe). Run the slot
- * in 1-bit mode (data on gpio4-24 only, via sdmmc_bus1) so the console
- * survives.
+ * the serial console dies mid-boot (right at the dwmmc probe).
  *
- * DEVELOPMENT/BENCH setting. PRODUCTION must restore bus-width = <4> with
- * sdmmc_bus4: the sdcard-update feature needs the full data bus, and
- * production has no serial console anyway (display + ssh/adb). To be split
- * per-image once the kernel becomes the linux-rithum recipe. See
- * rk3308-serial-console-writeup.md.
+ * PRODUCTION default: full 4-bit bus (sdmmc_bus4) - the sdcard-update
+ * feature needs the full data bus, and production has no serial console
+ * anyway (display + ssh/adb; a dead UART2 console is an accepted, desired
+ * trade rather than a regression). Bench/development builds instead
+ * include rk3308-rithum-switch-bench.dtsi (after this file), which
+ * overrides this node back to 1-bit mode so the console survives - see
+ * that file for the pinctrl detail. Split per-image (RKFW_DEPLOY_ENTRIES
+ * gated on IMAGE_MODE, meta-rithum-bsp's rithum-kernel.inc) now that the
+ * kernel is the linux-rithum recipe.
  */
 &sdmmc {
-	bus-width = <1>;
+	bus-width = <4>;
 	pinctrl-names = "default";
-	pinctrl-0 = <&sdmmc_clk &sdmmc_cmd &sdmmc_det &sdmmc_bus1>;
+	pinctrl-0 = <&sdmmc_clk &sdmmc_cmd &sdmmc_det &sdmmc_bus4>;
 	status = "okay";
 };
 

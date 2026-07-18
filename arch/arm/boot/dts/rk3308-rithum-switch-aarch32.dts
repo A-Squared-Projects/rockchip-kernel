@@ -12,22 +12,4 @@
 	compatible = "rithum,switch", "rockchip,rk3308";
 };
 
-/*
- * The RS panel enable is on gpio2 PA1 (the Pro's is gpio3 PA7); mux it to
- * GPIO in the panel pinctrl so u-boot can drive it (u-boot doesn't
- * mux-on-gpio-request). Matches the factory RS DTB / the .62 reference.
- */
-&panel {
-	pinctrl-names = "default";
-	pinctrl-0 = <&spi_init_cmd &lcd_pwr>;
-	enable-gpios = <&gpio2 RK_PA1 GPIO_ACTIVE_LOW>;
-};
-
-&pinctrl {
-	spi-panel {
-		lcd_pwr: lcd-pwr {
-			rockchip,pins =
-				<2 RK_PA1 RK_FUNC_GPIO &pcfg_pull_down>;
-		};
-	};
-};
+#include "rk3308-rithum-switch-rs.dtsi"

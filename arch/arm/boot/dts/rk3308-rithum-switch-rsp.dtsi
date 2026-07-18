@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Rithum Switch Pro (rsp) board-specific overrides: 512MB RAM, USB RTL8152
+ * Ethernet, RS485 on uart0, audio populated. #include'd by both the
+ * production and bench top-level .dts files for this variant, after
+ * rk3308-rithum-switch.dtsi and the model/compatible block.
+ */
+
+/* RS485 data port (misc power gpio handled by the application). */
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_xfer>;
+	status = "okay";
+};
+
+/*
+ * The Ethernet path (USB hub + RTL8152) shares the vbus_host enable;
+ * rmii_drv holds the refclk pin down alongside it, as on the factory
+ * DTB.
+ */
+&vbus_host {
+	pinctrl-0 = <&usb_drv &rmii_drv>;
+};
+
+/*
+ * Panel power rail pin, present on the Pro only. Keep the base dtsi's
+ * spi_init_cmd in the list (pinctrl-0 replaces, not extends) or the
+ * bit-bang SPI init pins (SCL/SDI/CS) are never muxed to GPIO - u-boot
+ * relies solely on this "default" state to mux them, so dropping it left
+ * u-boot unable to init the panel (no boot splash). The kernel happened to
+ * still work because it mux-on-gpio-request.
+ */
+&panel {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi_init_cmd &lcd_pwr>;
+	enable-gpios = <&gpio3 RK_PA7 GPIO_ACTIVE_LOW>;
+};
+
+&pinctrl {
+	rmii {
+		rmii_drv: rmii-drv {
+			rockchip,pins =
+				<0 RK_PC2 RK_FUNC_GPIO &pcfg_pull_down>;
+		};
+	};
+
+	spi-panel {
+		lcd_pwr: lcd-pwr {
+			rockchip,pins =
+				<3 RK_PA7 RK_FUNC_GPIO &pcfg_pull_down>;
+		};
+	};
+};
