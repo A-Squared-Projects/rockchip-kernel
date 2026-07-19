@@ -74,6 +74,36 @@
 	};
 
 	/*
+	 * OP-TEE (BL32, packed into trust.img alongside BL31) is discovered
+	 * by the kernel over SMC; the node just tells the optee driver to
+	 * probe. Board-scoped rather than in rk3308.dtsi: only this product
+	 * ships a trust.img containing BL32.
+	 */
+	firmware {
+		optee: optee {
+			compatible = "linaro,optee-tz";
+			method = "smc";
+		};
+	};
+
+	/*
+	 * Secure-world DRAM carveout: OP-TEE core (TEE_RAM 2M) is loaded at
+	 * 0x200000 (trust.img BL32_OPTION ADDR), followed by TA_RAM 1M and
+	 * SHM 1M (RK3308 layout per the Rockchip TEE SDK guide). Without
+	 * this, System RAM starts at exactly 0x200000 and the kernel faults
+	 * on firewalled secure memory the moment it touches it. no-map: the
+	 * optee driver memremaps the static SHM range it learns via
+	 * OPTEE_SMC_GET_SHM_CONFIG. Merged into rk3308.dtsi's existing
+	 * /reserved-memory (2/2 cells) by node name.
+	 */
+	reserved-memory {
+		optee@200000 {
+			reg = <0x0 0x200000 0x0 0x400000>;
+			no-map;
+		};
+	};
+
+	/*
 	 * The panel's ST7701-class controller is initialised over a 3-wire
 	 * 9-bit SPI command bus bit-banged directly off GPIOs (same pins as
 	 * the rk3308-evb-ext reference and the factory 4.4 kernel). Our
