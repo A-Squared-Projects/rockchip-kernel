@@ -24,6 +24,14 @@ CONFIG_CC_OPTIMIZE_FOR_SIZE=y
 CONFIG_EMBEDDED=y
 CONFIG_PERF_EVENTS=y
 CONFIG_ARCH_ROCKCHIP=y
+# OP-TEE memory reclaim: with BL32 at 0x200000-0x600000, AUTO_ZRELADDR would
+# force the zImage to decompress on the 128 MiB boundary (0x08000000), making
+# that the kernel PHYS_OFFSET and stranding ~122 MiB below it. Instead fix the
+# decompress address just above the secure carveout: PHYS_OFFSET=0x600000 +
+# rk3308 TEXT_OFFSET 0x58000 => ZRELADDR=0x658000. AUTO_ZRELADDR is exposed on
+# multiplatform via a Kconfig change (arch/arm/Kconfig).
+# CONFIG_AUTO_ZRELADDR is not set
+CONFIG_PHYS_OFFSET=0x600000
 CONFIG_ARM_THUMBEE=y
 # CONFIG_ARM_ERRATA_643719 is not set
 CONFIG_SMP=y
