@@ -340,6 +340,25 @@
  * has been running at ~27K for a full boot, so half is still ample, and 64K
  * holds a panic tail with backtrace comfortably.
  */
+/*
+ * The DW watchdog's TOP (timeout period) table. The IP here is synthesised
+ * with programmable TOPs - WDOG_COMP_PARAMS_1's USE_FIX_TOP bit is clear - so
+ * the driver looks for this property, does not find it, warns "No valid TOPs
+ * array specified" every boot, and falls back to its own fixed table.
+ *
+ * These are not guessed from a datasheet: they are what the hardware actually
+ * loads, measured on a running unit. With TORR index 15 selected,
+ * WDOG_CURRENT_COUNT (0xff080008) reads ~0x7AA8458D just after a pet and
+ * decrements at ~101.8M/s (pclk_wdt = 100 MHz), i.e. a reload of 0x80000000
+ * ticks = 21.47s. That matches 1 << (16 + idx) exactly, and rules out the
+ * binding's documented default series (0x1000 << idx), whose maximum TOP is
+ * 16x smaller than the value the counter demonstrably holds.
+ *
+ * Stating them explicitly costs nothing and buys two things: the boot warning
+ * goes away, and the mapping stops depending on a kernel-internal fallback
+ * table that could change under us. Behaviour is unchanged - `watchdog -F -t
+ * 19` still selects index 15, a real 21.47s timeout petted every ~9.5s.
+ */
 &ramoops {
 	record-size = <0x10000>;
 	console-size = <0x10000>;
@@ -453,6 +472,13 @@
 
 &wdt {
 	status = "okay";
+
+	snps,watchdog-tops = <
+		0x00010000 0x00020000 0x00040000 0x00080000
+		0x00100000 0x00200000 0x00400000 0x00800000
+		0x01000000 0x02000000 0x04000000 0x08000000
+		0x10000000 0x20000000 0x40000000 0x80000000
+	>;
 };
 
 /*
