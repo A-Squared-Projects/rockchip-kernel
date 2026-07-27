@@ -306,6 +306,51 @@
 };
 
 /*
+ * Host-port VBUS ramp. vbus_host (inherited: a GPIO regulator-fixed on
+ * gpio0 RK_PC5) powers the USB hub and, on the Pro, the RTL8152 ethernet
+ * behind it; u2phy_host consumes it as phy-supply. As inherited it has
+ * neither a startup delay nor boot-on, so the PHY flips the rail and
+ * enumeration proceeds immediately - the hub gets no time to finish its own
+ * power-on reset. That matches the intermittent failure seen on Pro units:
+ * both EHCI and OHCI fail "device descriptor read" (-71 EPROTO / -62 ETIME)
+ * through the USB core's retries, so the RTL8152 never enumerates and eth0
+ * never appears, varying with how the timing lands across power cycles.
+ *
+ * 100ms is the usual hub bPwrOn2PwrGood budget (USB 2.0 spec allows up to
+ * 100ms before a hub must be ready). regulator-boot-on says the rail is
+ * already on when the kernel starts, so the core doesn't glitch it off and
+ * on again during handover from u-boot.
+ *
+ * NOT the usb2phy "IRQ index 0 not found" line, which is unrelated: it is
+ * present on boots that enumerate perfectly, and the per-port linestate
+ * interrupt the driver actually needs is wired (no "no linestate irq
+ * provided" error). That message costs wakeup plumbing, not enumeration.
+ */
+/*
+ * Split the inherited console-only ramoops so kernel panics are captured too.
+ * The voice-module dtsi we inherit sets record-size = <0>, leaving a 128K
+ * console-only region: /sys/fs/pstore has only console-ramoops, so a panic or
+ * oops leaves nothing behind - the one thing you most want after an
+ * unexplained reboot in the field. (It is also what makes the kernel log
+ * "pstore: Invalid compression size for deflate: 0" every boot: with no dmesg
+ * zone the compression buffer sizes to nothing.)
+ *
+ * Same region, same size - deliberately no extra reservation, this SoC has
+ * little enough RAM - just divided: 64K console, 64K dmesg. The console zone
+ * has been running at ~27K for a full boot, so half is still ample, and 64K
+ * holds a panic tail with backtrace comfortably.
+ */
+&ramoops {
+	record-size = <0x10000>;
+	console-size = <0x10000>;
+};
+
+&vbus_host {
+	regulator-boot-on;
+	startup-delay-us = <100000>;
+};
+
+/*
  * The dwc2 OTG port is the ADB port (device-mode to a host PC); the
  * RTL8152 ethernet and other USB live on the EHCI/OHCI host controllers.
  * In "otg" mode with no ID/role signal dwc2 defaults to host, so the ADB
