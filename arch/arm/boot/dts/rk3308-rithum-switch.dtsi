@@ -362,6 +362,24 @@
 &ramoops {
 	record-size = <0x10000>;
 	console-size = <0x10000>;
+
+	/*
+	 * ECC, because these records are read by people. ramoops lives in DRAM,
+	 * which decays when power actually goes away rather than being warm
+	 * reset - and what came back from a real power cut was recognisable
+	 * fragments of kernel log embedded in bit rot, which invites someone to
+	 * chase a phantom. With ECC each record instead ends in either "ECC: No
+	 * errors detected" or a count of corrected bytes and unrecoverable
+	 * blocks, and a record whose header is too far gone is discarded with
+	 * "uncorrectable error in header" instead of being handed over as
+	 * garbage.
+	 *
+	 * 16 bytes of parity per 128-byte block, so ~7.1K of each 64K zone:
+	 * usable payload drops to ~57K per zone, still ample for a panic tail
+	 * (the console zone had been running at ~27K for a whole boot). No extra
+	 * memory is reserved - it comes out of the same region.
+	 */
+	ecc-size = <16>;
 };
 
 &vbus_host {
