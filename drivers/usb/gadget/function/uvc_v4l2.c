@@ -210,6 +210,8 @@ uvc_send_response(struct uvc_device *uvc, struct uvc_request_data *data)
 		return usb_ep_set_halt(cdev->gadget->ep0);
 
 	req->length = min_t(unsigned int, uvc->event_length, data->length);
+	if (req->length > sizeof(data->data))
+		req->length = sizeof(data->data);
 	req->zero = data->length < uvc->event_length;
 
 	uvc_trace(UVC_TRACE_CONTROL, "%s: req len %d\n", __func__, req->length);
