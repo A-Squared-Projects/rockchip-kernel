@@ -1273,6 +1273,10 @@ dtb-$(CONFIG_ARCH_ROCKCHIP) += \
 	rk3308-rithum-switch-aarch32-bench.dtb \
 	rk3308-rithum-switch-pro-aarch32.dtb \
 	rk3308-rithum-switch-pro-aarch32-bench.dtb \
+	rk3308-rithum-switch-aarch32-no-optee.dtb \
+	rk3308-rithum-switch-aarch32-bench-no-optee.dtb \
+	rk3308-rithum-switch-pro-aarch32-no-optee.dtb \
+	rk3308-rithum-switch-pro-aarch32-bench-no-optee.dtb \
 	rk3502g-evb1-v10.dtb \
 	rk3503g-evb1-v10.dtb \
 	rk3506b-evb1-v10.dtb \

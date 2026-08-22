@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Overlay for a trust.img with no BL32 (no secure world): removes the
+ * OP-TEE DRAM carveout rk3308-rithum-switch.dtsi reserves at 0x200000.
+ * Without an OP-TEE to occupy it, that reservation only steals 4 MiB of
+ * low memory - and on the Android boot path, which XIPs the kernel in
+ * place rather than honouring the boot image's declared load address,
+ * the kernel's own execution range lands inside 0x200000-0x600000. The
+ * firmware/optee node is left in place: the SMC probe it triggers just
+ * fails cleanly when there is no OP-TEE to answer it.
+ *
+ * #include this AFTER rk3308-rithum-switch.dtsi (or a .dts that already
+ * did), so there is a node here to delete.
+ */
+
+&{/reserved-memory} {
+	/delete-node/ optee@200000;
+};
