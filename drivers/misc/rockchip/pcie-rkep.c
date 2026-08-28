@@ -34,7 +34,7 @@
 #endif
 
 #define DRV_NAME "pcie-rkep"
-#define DRV_VERSION 0x00030300
+#define DRV_VERSION 0x00030301
 
 #ifndef PCI_VENDOR_ID_ROCKCHIP
 #define PCI_VENDOR_ID_ROCKCHIP          0x1d87
@@ -97,10 +97,11 @@
 #define PCIE_CFG_ELBI_APP_OFFSET	0xe00
 #define PCIE_CFG_ELBI_USER_DATA_OFF	0x10
 #define PCIE_CFG_USER5_DATA_OFF		0x14
+#define PCIE_CFG_USER15_DATA_OFF	0x3c
 
 #define PCIE_ELBI_REG_NUM		0x2
 
-#define RKEP_EP_ELBI_TIEMOUT_US		100000
+#define RKEP_EP_ELBI_TIMEOUT_US		100000
 
 #define PCIE_RK3568_RC_DBI_BASE		0xf6000000
 #define PCIE_RK3588_RC_DBI_BASE		0xf5000000
@@ -118,6 +119,8 @@ struct pcie_rkep {
 	void __iomem *bar4;
 	struct pcie_rkep_irq_context irq_ctx[RKEP_NUM_IRQ_VECTORS];
 	int irq_valid;
+	u8 gen;
+	u8 lanes;
 
 	struct miscdevice dev;
 	struct dma_trx_obj *dma_obj;
@@ -162,7 +165,6 @@ static bool pcie_rkep_wait_for_link_up(struct pci_dev *pdev)
 	int timeout = 1000;
 	bool ret;
 	u16 lnk_status;
-	bool active = true;
 	struct pci_dev *bridge;
 
 	bridge = pci_upstream_bridge(pdev);
@@ -176,12 +178,11 @@ static bool pcie_rkep_wait_for_link_up(struct pci_dev *pdev)
 	 * If the link fails to activate, either the device was physically
 	 * removed or the link is permanently failed.
 	 */
-	if (active)
-		msleep(20);
+	msleep(20);
 	for (;;) {
 		pcie_capability_read_word(bridge, PCI_EXP_LNKSTA, &lnk_status);
 		ret = !!(lnk_status & PCI_EXP_LNKSTA_DLLLA);
-		if (ret == active)
+		if (ret)
 			break;
 		if (timeout <= 0)
 			break;
@@ -196,12 +197,64 @@ static bool pcie_rkep_is_link_lost(struct pci_dev *pdev)
 {
 	u32 bar0, bar4;
 
-	pcie_capability_read_dword(pdev, PCI_BASE_ADDRESS_0, &bar0);
-	pcie_capability_read_dword(pdev, PCI_BASE_ADDRESS_4, &bar4);
-	if ((bar0 == 0xffffffff || bar0 == 0) && (bar4 == 0xffffffff || bar4 == 0))
-		return true;
-	else
-		return false;
+	pci_read_config_dword(pdev, PCI_BASE_ADDRESS_0, &bar0);
+	pci_read_config_dword(pdev, PCI_BASE_ADDRESS_4, &bar4);
+	return (bar0 == 0xffffffff || bar0 == 0) &&
+	       (bar4 == 0xffffffff || bar4 == 0);
+}
+
+static int pcie_rkep_get_pci_link_data(struct pcie_rkep *pcie_rkep, u16 link_status)
+{
+	switch (link_status & PCI_EXP_LNKSTA_NLW) {
+	case PCI_EXP_LNKSTA_NLW_X1:
+		pcie_rkep->lanes = 1;
+		break;
+	case PCI_EXP_LNKSTA_NLW_X2:
+		pcie_rkep->lanes = 2;
+		break;
+	case PCI_EXP_LNKSTA_NLW_X4:
+		pcie_rkep->lanes = 4;
+		break;
+	default:
+		pcie_rkep->lanes = 4;
+		break;
+	}
+
+	switch (link_status & PCI_EXP_LNKSTA_CLS) {
+	case PCI_EXP_LNKSTA_CLS_2_5GB:
+		pcie_rkep->gen = 1;
+		break;
+	case PCI_EXP_LNKSTA_CLS_5_0GB:
+		pcie_rkep->gen = 2;
+		break;
+	case PCI_EXP_LNKSTA_CLS_8_0GB:
+		pcie_rkep->gen = 3;
+		break;
+	default:
+		pcie_rkep->gen = 3;
+		break;
+	}
+
+	return 0;
+}
+
+static int rkep_ep_slot_reset(struct pcie_rkep *pcie_rkep)
+{
+	int ret = 0;
+	struct pci_dev *pdev = pcie_rkep->pdev;
+
+	mutex_lock(&pcie_rkep->dev_lock_mutex);
+	if (pcie_rkep_wait_for_link_up(pdev)) {
+		pci_restore_state(pdev);
+		pci_set_master(pdev);
+		pci_save_state(pdev);
+	} else {
+		dev_warn(&pdev->dev, "%s failed\n", __func__);
+		ret = -ETIMEDOUT;
+	}
+	mutex_unlock(&pcie_rkep->dev_lock_mutex);
+
+	return ret;
 }
 
 static int rkep_ep_dma_xfer(struct pcie_rkep *pcie_rkep, struct pcie_ep_dma_block_req *dma)
@@ -282,7 +335,7 @@ static int rkep_ep_raise_elbi_irq(struct pcie_file *pcie_file, u32 interrupt_num
 	index = interrupt_num / 16;
 	off = interrupt_num % 16;
 
-	for (i = 0; i < RKEP_EP_ELBI_TIEMOUT_US; i += gap_us) {
+	for (i = 0; i < RKEP_EP_ELBI_TIMEOUT_US; i += gap_us) {
 		pci_read_config_dword(pcie_rkep->pdev, PCIE_CFG_ELBI_APP_OFFSET + 4 * index, &val);
 		if (val & BIT(off))
 			usleep_range(gap_us, gap_us + 10);
@@ -345,6 +398,33 @@ static int rkep_ep_poll_irq_user(struct pcie_file *pcie_file, struct pcie_ep_obj
 	dev_dbg(&pcie_rkep->pdev->dev, "poll virtual id %d, ret=%d\n", index, cfg->poll_status);
 
 	return 0;
+}
+
+static void rkep_ep_elbi_data_compare_and_swap(struct pcie_file *pcie_file,
+					       struct pcie_ep_elbi_data_compare_and_swap_param *cas)
+{
+	struct pcie_rkep *pcie_rkep = pcie_file->pcie_rkep;
+	u32 val;
+
+	if (cas->offset > PCIE_CFG_USER15_DATA_OFF) {
+		cas->result = -EINVAL;
+		return;
+	}
+
+	mutex_lock(&pcie_rkep->dev_lock_mutex);
+
+	cas->result = 0;
+	pci_read_config_dword(pcie_rkep->pdev,
+			      PCIE_CFG_ELBI_APP_OFFSET + cas->offset,
+			      &val);
+	if (val == cas->old_val) {
+		pci_write_config_dword(pcie_rkep->pdev,
+				       PCIE_CFG_ELBI_APP_OFFSET + cas->offset,
+				       cas->new_val);
+		cas->result = 1;
+	}
+
+	mutex_unlock(&pcie_rkep->dev_lock_mutex);
 }
 
 static int rkep_mem_continuous_buffer_alloc(struct pcie_file *pcie_file,
@@ -427,7 +507,7 @@ static int pcie_rkep_open(struct inode *inode, struct file *file)
 	struct pcie_rkep *pcie_rkep = container_of(miscdev, struct pcie_rkep, dev);
 	struct pcie_file *pcie_file = NULL;
 
-	pcie_file = devm_kzalloc(&pcie_rkep->pdev->dev, sizeof(struct pcie_file), GFP_KERNEL);
+	pcie_file = kzalloc(sizeof(struct pcie_file), GFP_KERNEL);
 	if (!pcie_file)
 		return -ENOMEM;
 
@@ -475,6 +555,9 @@ static int pcie_rkep_release(struct inode *inode, struct file *file)
 		kfree(buffer_req);
 	}
 	mutex_unlock(&pcie_file->file_lock_mutex);
+
+	kfree(pcie_file);
+	file->private_data = NULL;
 
 	return 0;
 }
@@ -686,6 +769,8 @@ static int pcie_rkep_mmap(struct file *file, struct vm_area_struct *vma)
 		addr = pci_resource_start(dev, 2);
 		break;
 	case PCIE_EP_MMAP_RESOURCE_BAR4:
+		if (!pcie_rkep->bar4)
+			return -EINVAL;
 		bar_size = pci_resource_len(dev, 4);
 		if (size > bar_size) {
 			dev_warn(&pcie_rkep->pdev->dev, "bar4 mmap size is out of limitation\n");
@@ -751,6 +836,7 @@ static long pcie_rkep_ioctl(struct file *file, unsigned int cmd, unsigned long a
 	void __user *uarg = (void __user *)args;
 	struct pcie_ep_obj_poll_virtual_id_cfg poll_cfg;
 	struct pcie_ep_continuous_buffer_param cont_buf_pram;
+	struct pcie_ep_elbi_data_compare_and_swap_param elbi_cas_para;
 	int mmap_res;
 	int ret;
 	int index, wr_mask, rd_mask;
@@ -788,6 +874,8 @@ static long pcie_rkep_ioctl(struct file *file, unsigned int cmd, unsigned long a
 					   DMA_TO_DEVICE);
 		break;
 	case PCIE_EP_DMA_XFER_BLOCK:
+		if (!pcie_rkep->bar4)
+			return -EINVAL;
 		ret = copy_from_user(&dma, uarg, sizeof(dma));
 		if (ret) {
 			dev_err(&pcie_rkep->pdev->dev,
@@ -801,6 +889,8 @@ static long pcie_rkep_ioctl(struct file *file, unsigned int cmd, unsigned long a
 		}
 		break;
 	case PCIE_EP_DMA_MSI_DETECT:
+		if (!pcie_rkep->bar4)
+			return -EINVAL;
 		/*
 		 * Enabling the corresponding interrupt via EP will enable the corresponding MSI
 		 * behavior notification RC.
@@ -916,11 +1006,29 @@ static long pcie_rkep_ioctl(struct file *file, unsigned int cmd, unsigned long a
 	case PCIE_EP_RESET_CTRL:
 #ifdef CONFIG_PCIEASPM_EXT
 		dev_info(&pcie_rkep->pdev->dev, "reset controller\n");
-		return rockchip_dw_pcie_pm_ctrl_for_user(pcie_rkep->pdev, ROCKCHIP_PCIE_PM_CTRL_RESET);
+		ret = rockchip_dw_pcie_pm_ctrl_for_user(pcie_rkep->pdev, ROCKCHIP_PCIE_PM_CTRL_RESET);
+		if (ret) {
+			dev_warn(&pcie_rkep->pdev->dev, "reset controller failed, ret %d\n", ret);
+			return ret;
+		}
+		return rkep_ep_slot_reset(pcie_rkep);
 #else
 		dev_warn(&pcie_rkep->pdev->dev, "reset controller not support\n");
 		return -EINVAL;
 #endif
+	case PCIE_EP_RESET_SLOT:
+		return rkep_ep_slot_reset(pcie_rkep);
+	case PCIE_EP_ELBI_DATA_COMPARE_AND_SWAP:
+		if (copy_from_user(&elbi_cas_para, uarg, sizeof(elbi_cas_para))) {
+			dev_err(&pcie_rkep->pdev->dev, "failed to get copy from user\n");
+			return -EFAULT;
+		}
+
+		rkep_ep_elbi_data_compare_and_swap(pcie_file, &elbi_cas_para);
+
+		if (copy_to_user(uarg, &elbi_cas_para, sizeof(elbi_cas_para)))
+			return -EFAULT;
+		break;
 	case PCIE_EP_CONTINUOUS_BUFFER_ALLOC:
 		if (copy_from_user(&cont_buf_pram, uarg, sizeof(cont_buf_pram)))
 			return -EFAULT;
@@ -1327,10 +1435,11 @@ static int pcie_rkep_request_irq(struct pcie_rkep *pcie_rkep, u32 irq_type)
 {
 	int nvec, ret = -EINVAL, i;
 
-	/* Using msi as default */
 	nvec = pci_alloc_irq_vectors(pcie_rkep->pdev, 1, RKEP_NUM_IRQ_VECTORS, irq_type);
-	if (nvec < 0)
+	if (nvec < 0) {
+		dev_err(&pcie_rkep->pdev->dev, "fail to allocate interrupt, ret=%d\n", nvec);
 		return nvec;
+	}
 
 	if (nvec != RKEP_NUM_IRQ_VECTORS)
 		dev_err(&pcie_rkep->pdev->dev, "only allocate %d irq interrupt, irq_type=%d\n", nvec, irq_type);
@@ -1349,14 +1458,15 @@ static int pcie_rkep_request_irq(struct pcie_rkep *pcie_rkep, u32 irq_type)
 
 	if (ret) {
 		pcie_rkep_release_irq(pcie_rkep);
-		dev_err(&pcie_rkep->pdev->dev, "fail to allocate msi interrupt\n");
+		dev_err(&pcie_rkep->pdev->dev, "fail to allocate interrupt, type=%d\n", irq_type);
 	} else {
-		dev_err(&pcie_rkep->pdev->dev, "success to request msi irq\n");
+		dev_info(&pcie_rkep->pdev->dev, "success to request irq, type=%d\n", irq_type);
 	}
 
 	return ret;
 }
 
+#ifdef CONFIG_NO_GKI
 static int rkep_loadfile(struct device *dev, char *path, void __iomem *bar, int pos)
 {
 	struct file *p_file = NULL;
@@ -1403,6 +1513,7 @@ static ssize_t rkep_store(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 static DEVICE_ATTR_WO(rkep);
+#endif /*  #ifdef CONFIG_NO_GKI */
 
 static int pcie_rkep_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
@@ -1411,6 +1522,7 @@ static int pcie_rkep_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	u8 *name;
 	u16 val;
 	bool dmatest_irq = false;
+	u16 link_status;
 
 	pcie_rkep = devm_kzalloc(&pdev->dev, sizeof(*pcie_rkep), GFP_KERNEL);
 	if (!pcie_rkep)
@@ -1427,6 +1539,8 @@ static int pcie_rkep_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		dev_err(&pdev->dev, "pci_enable_device failed %d\n", ret);
 		goto err_pci_enable_dev;
 	}
+
+	pci_set_master(pdev);
 
 	ret = pci_request_regions(pdev, DRV_NAME);
 	if (ret) {
@@ -1452,13 +1566,13 @@ static int pcie_rkep_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	dev_dbg(&pdev->dev, "get bar2 address is %p\n", pcie_rkep->bar2);
 
 	pcie_rkep->bar4 = pci_iomap(pdev, 4, 0);
-	if (!pcie_rkep->bar4) {
-		dev_err(&pdev->dev, "pci_iomap bar4 failed\n");
-		ret = -ENOMEM;
-		goto err_pci_iomap;
-	}
+	if (pcie_rkep->bar4)
+		dev_dbg(&pdev->dev, "get bar4 address is %p\n", pcie_rkep->bar4);
+	else
+		dev_info(&pdev->dev, "no bar4\n");
 
-	dev_dbg(&pdev->dev, "get bar4 address is %p\n", pcie_rkep->bar4);
+	pcie_capability_read_word(pdev, PCI_EXP_LNKSTA, &link_status);
+	pcie_rkep_get_pci_link_data(pcie_rkep, link_status);
 
 	sprintf(name, "%s-%s", DRV_NAME, dev_name(&pdev->dev));
 	pcie_rkep->dev.minor = MISC_DYNAMIC_MINOR;
@@ -1480,18 +1594,24 @@ static int pcie_rkep_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	init_waitqueue_head(&pcie_rkep->wq_head);
 	ret = pcie_rkep_request_irq(pcie_rkep, PCI_IRQ_MSI);
-	if (ret)
-		goto err_register_irq;
-
-	pcie_rkep->dma_obj = pcie_dw_dmatest_register(&pdev->dev, dmatest_irq);
-	if (IS_ERR(pcie_rkep->dma_obj)) {
-		dev_err(&pcie_rkep->pdev->dev, "failed to prepare dmatest\n");
-		ret = -EINVAL;
-		goto err_register_obj;
+	if (ret) {
+		ret = pcie_rkep_request_irq(pcie_rkep, PCI_IRQ_LEGACY);
+		if (ret)
+			goto err_register_irq;
 	}
 
+	if (pcie_rkep->bar4) {
+		pcie_rkep->dma_obj = pcie_dw_dmatest_register(&pdev->dev, dmatest_irq);
+		if (IS_ERR(pcie_rkep->dma_obj)) {
+			dev_err(&pcie_rkep->pdev->dev, "failed to prepare dmatest\n");
+			ret = PTR_ERR(pcie_rkep->dma_obj);
+			pcie_rkep->dma_obj = NULL;
+			goto err_register_obj;
+		}
+	}
+
+	dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (pcie_rkep->dma_obj) {
-		dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 		pcie_rkep->dma_obj->start_dma_func = pcie_rkep_start_dma_dwc;
 		pcie_rkep->dma_obj->config_dma_func = pcie_rkep_config_dma_dwc;
 		pcie_rkep->dma_obj->get_dma_status = pcie_rkep_get_dma_status;
@@ -1511,6 +1631,7 @@ static int pcie_rkep_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 			pcie_rkep_writel_dbi(pcie_rkep, PCIE_DMA_OFFSET + PCIE_DMA_WR_LL_ERR_EN, 0xffffffff);
 			pcie_rkep_writel_dbi(pcie_rkep, PCIE_DMA_OFFSET + PCIE_DMA_RD_LL_ERR_EN, 0xffffffff);
 		}
+		pcie_dw_dmatest_set_bandwidth(pcie_rkep->dma_obj, pcie_rkep->gen, pcie_rkep->lanes);
 	}
 
 	pcie_rkep->user_pages = alloc_pages(GFP_KERNEL, get_order(RKEP_USER_MEM_SIZE));
@@ -1530,10 +1651,13 @@ static int pcie_rkep_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	dev_info(&pdev->dev, "obj_info magic=%x, ver=%x\n", pcie_rkep->obj_info->magic,
 		 pcie_rkep->obj_info->version);
 	dev_info(&pdev->dev, "func_ver=%x\n", DRV_VERSION);
+	dev_info(&pdev->dev, "gen%dx%d\n", pcie_rkep->gen, pcie_rkep->lanes);
 
 	pci_save_state(pdev);
 
+#ifdef CONFIG_NO_GKI
 	device_create_file(&pdev->dev, &dev_attr_rkep);
+#endif
 
 	return 0;
 err_register_obj:
@@ -1562,7 +1686,9 @@ static void pcie_rkep_remove(struct pci_dev *pdev)
 	if (pcie_rkep->dma_obj)
 		pcie_dw_dmatest_unregister(pcie_rkep->dma_obj);
 
+#ifdef CONFIG_NO_GKI
 	device_remove_file(&pdev->dev, &dev_attr_rkep);
+#endif
 	__free_pages(pcie_rkep->user_pages, get_order(RKEP_USER_MEM_SIZE));
 	pcie_rkep_release_irq(pcie_rkep);
 
@@ -1602,14 +1728,14 @@ static pci_ers_result_t pcie_rkep_error_detected(struct pci_dev *pdev,
 
 static pci_ers_result_t pcie_rkep_slot_reset(struct pci_dev *pdev)
 {
+	struct pcie_rkep *pcie_rkep = pci_get_drvdata(pdev);
+
 	dev_info(&pdev->dev, "restart after slot reset\n");
 
-	if (pcie_rkep_wait_for_link_up(pdev)) {
-		pci_restore_state(pdev);
+	if (rkep_ep_slot_reset(pcie_rkep) == 0)
 		return PCI_ERS_RESULT_RECOVERED;
-	} else {
+	else
 		return PCI_ERS_RESULT_DISCONNECT;
-	}
 }
 
 static const struct pci_error_handlers pcie_rkep_err_handler = {

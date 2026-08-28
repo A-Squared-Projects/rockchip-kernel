@@ -641,18 +641,35 @@ static void scale_config(struct rkvpss_offline_dev *ofl, struct rkvpss_frame_cfg
 			 bool unite, bool left)
 {
 	int i;
+	bool is_downscale_w;
+	bool is_downscale_h;
+	bool is_downscale;
 	bool use_avg_scale;
 
 	for (i = 0; i < RKVPSS_OUT_V20_MAX; i++) {
 		if (!cfg->output[i].enable)
 			continue;
 
-		use_avg_scale = (i == RKVPSS_OUTPUT_CH0 || i == RKVPSS_OUTPUT_CH2)
-				&& cfg->output[i].avg_scl_down;
+		is_downscale_w = cfg->output[i].scl_width < cfg->output[i].crop_width;
+		is_downscale_h = cfg->output[i].scl_height < cfg->output[i].crop_height;
+		is_downscale = is_downscale_w && is_downscale_h;
 
-		if (cfg->output[i].avg_scl_down && !use_avg_scale) {
-			v4l2_warn(&ofl->v4l2_dev,
-				"%s CH%d: average_scale_down not supported (only CH0/CH2)\n",
+		/* Scale algorithm selection for CH0 and CH2:
+		 * - Average algorithm: ONLY supports downscaling (scl < crop)
+		 * - Bilinear algorithm: supports both upscaling and downscaling
+		 *
+		 * Strategy:
+		 * - If downscaling AND user configured avg_scl_down=1: use average algorithm
+		 * - Otherwise (upscaling or user set avg_scl_down=0): use bilinear algorithm
+		 */
+		use_avg_scale = (i == RKVPSS_OUTPUT_CH0 || i == RKVPSS_OUTPUT_CH2) &&
+				is_downscale && cfg->output[i].avg_scl_down;
+
+		/* Warn if user configured average but it cannot be used */
+		if ((i == RKVPSS_OUTPUT_CH0 || i == RKVPSS_OUTPUT_CH2) &&
+		    cfg->output[i].avg_scl_down && !is_downscale) {
+			v4l2_info(&ofl->v4l2_dev,
+				 "%s CH%d: avg_scl_down configured but not downscaling, using bilinear instead\n",
 				 __func__, i);
 		}
 
@@ -1480,19 +1497,19 @@ static int write_config(struct rkvpss_offline_dev *ofl,
 			break;
 		case V4L2_PIX_FMT_FBC0:
 			cfg->output[i].stride = 0;
-			header_size = ((cfg->input.width + 63) / 64) *
-				((cfg->input.height + 3) / 4) * 16;
-			payload_size = ((cfg->input.width + 63) / 64) * 384 *
-				((cfg->input.height + 3) / 4);
+			header_size = ((w + 63) / 64) *
+				((h + 3) / 4) * 16;
+			payload_size = ((w + 63) / 64) * 384 *
+				((h + 3) / 4);
 			out_ch[i].ctrl |= RKVPSS_MI_CHN_WR_OUTPUT_YUV420;
 			out_ch[i].size = header_size + payload_size;
 			break;
 		case V4L2_PIX_FMT_FBC2:
-			cfg->input.stride = 0;
-			header_size = ((cfg->input.width + 63) / 64) *
-				((cfg->input.height + 3) / 4) * 16;
-			payload_size = ((cfg->input.width + 63) / 64) * 512 *
-				((cfg->input.height + 3) / 4);
+			cfg->output[i].stride = 0;
+			header_size = ((w + 63) / 64) *
+				((h + 3) / 4) * 16;
+			payload_size = ((w + 63) / 64) * 512 *
+				((h + 3) / 4);
 			out_ch[i].ctrl |= RKVPSS_MI_CHN_WR_OUTPUT_YUV422;
 			out_ch[i].size = header_size + payload_size;
 			break;
@@ -1545,13 +1562,19 @@ static int write_config(struct rkvpss_offline_dev *ofl,
 
 		if (cfg->output[i].format == V4L2_PIX_FMT_FBC0 ||
 		    cfg->output[i].format == V4L2_PIX_FMT_FBC2) {
+			/* Recalculate w/h for this channel */
+			int fbc_w = cfg->output[i].aspt.enable ?
+			    cfg->output[i].aspt.width : cfg->output[i].scl_width;
+			int fbc_h = cfg->output[i].aspt.enable ?
+			    cfg->output[i].aspt.height : cfg->output[i].scl_height;
+
 			val = sg_dma_address(sg_tbl->sgl);
 
 			reg = RKVPSS_MI_CHN0_WR_CB_BASE;
 			rkvpss_hw_write(hw, reg + i * 0x100, val);
 
-			header_size = ((cfg->input.width + 63) / 64) *
-				((cfg->input.height + 3) / 4) * 16;
+			header_size = ((fbc_w + 63) / 64) *
+				((fbc_h + 3) / 4) * 16;
 			val += header_size;
 			reg = RKVPSS_MI_CHN0_WR_Y_BASE;
 			rkvpss_hw_write(hw, reg + i * 0x100, val);
@@ -1563,11 +1586,11 @@ static int write_config(struct rkvpss_offline_dev *ofl,
 
 			reg = RKVPSS_MI_CHN0_WR_Y_SIZE;
 			if (cfg->output[i].format == V4L2_PIX_FMT_FBC0)
-				payload_size = ((cfg->input.width + 63) / 64) * 384 *
-					((cfg->input.height + 3) / 4);
+				payload_size = ((fbc_w + 63) / 64) * 384 *
+					((fbc_h + 3) / 4);
 			else if (cfg->output[i].format == V4L2_PIX_FMT_FBC2)
-				payload_size = ((cfg->input.width + 63) / 64) * 512 *
-					((cfg->input.height + 3) / 4);
+				payload_size = ((fbc_w + 63) / 64) * 512 *
+					((fbc_h + 3) / 4);
 
 			val = payload_size;
 			rkvpss_hw_write(hw, reg + i * 0x100, val);
@@ -1831,6 +1854,9 @@ static void calc_unite_scl_params(struct rkvpss_offline_dev *ofl, struct rkvpss_
 	struct rkvpss_unite_scl_params *params;
 	u32 right_scl_need_size_y, right_scl_need_size_c;
 	bool use_average;
+	bool is_downscale_w;
+	bool is_downscale_h;
+	bool is_downscale;
 	int i;
 
 	for (i = 0; i < RKVPSS_OUT_V20_MAX; i++) {
@@ -1838,8 +1864,21 @@ static void calc_unite_scl_params(struct rkvpss_offline_dev *ofl, struct rkvpss_
 			continue;
 
 		params = &ofl->unite_params[i];
+
+		is_downscale_w = cfg->output[i].scl_width < cfg->output[i].crop_width;
+		is_downscale_h = cfg->output[i].scl_height < cfg->output[i].crop_height;
+		is_downscale = is_downscale_w && is_downscale_h;
+
 		use_average = (i == RKVPSS_OUTPUT_CH0 || i == RKVPSS_OUTPUT_CH2)
-			      && cfg->output[i].avg_scl_down;
+			      && is_downscale && cfg->output[i].avg_scl_down;
+
+		/* Warn if user configured average but it cannot be used in unite mode */
+		if ((i == RKVPSS_OUTPUT_CH0 || i == RKVPSS_OUTPUT_CH2) &&
+		    cfg->output[i].avg_scl_down && !is_downscale) {
+			v4l2_info(&ofl->v4l2_dev,
+				 "%s CH%d: avg_scl_down configured but not downscaling, using bilinear instead (unite mode)\n",
+				 __func__, i);
+		}
 
 		if (use_average)
 			calc_unite_scl_params_avg(ofl, &cfg->output[i], params,

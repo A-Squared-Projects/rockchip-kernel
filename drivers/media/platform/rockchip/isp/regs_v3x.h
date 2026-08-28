@@ -723,6 +723,7 @@
 #define ISP3X_MI_LUT_LDCH_RD_H_WSIZE		(ISP3X_MI_BASE + 0x00558)
 #define ISP3X_MI_LUT_LDCH_RD_V_SIZE		(ISP3X_MI_BASE + 0x0055C)
 #define ISP3X_MI_DBR_WR_BASE			(ISP3X_MI_BASE + 0x00560)
+#define ISP35_AIISP_GAIN_RD_HV_SIZE		(ISP3X_MI_BASE + 0x00560)
 #define ISP3X_MI_DBR_WR_SIZE			(ISP3X_MI_BASE + 0x00564)
 #define ISP39_W3A_WR_SIZE			(ISP3X_MI_BASE + 0x00564)
 #define ISP3X_MI_DBR_WR_LENGTH			(ISP3X_MI_BASE + 0x00568)
@@ -3230,10 +3231,10 @@
 #define ISP39_DHAZ_IIR_WR_ID(x)		(((x) & 0xff) << 16)
 #define ISP39_DHAZ_IIR_WR_CLEAR		BIT(24)
 
-#define ISP33_IIR_RD_ID(x)		((x) & 0x3f)
+#define ISP33_IIR_RD_ID(x)		((x) & 0xff)
 #define ISP33_IIR_RD_P			BIT(8)
 #define ISP33_IIR_RDATA_VAL		BIT(9)
-#define ISP33_IIR_WR_ID(x)		(((x) & 0x3f) << 16)
+#define ISP33_IIR_WR_ID(x)		(((x) & 0xff) << 16)
 #define ISP33_IIR_WR_CLEAR		BIT(24)
 
 /* HDRTMO */

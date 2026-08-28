@@ -788,7 +788,7 @@ static int udphy_status_check(struct rockchip_udphy *udphy)
 				dev_notice(udphy->dev, "trsv ln2 mon rx cdr lock timeout\n");
 		}
 
-		if (ret) {
+		if (ret && udphy->sw) {
 			udphy_u3_port_disable(udphy, true);
 			dev_warn(udphy->dev, "disable u3 port because udphy not ready\n");
 		}
@@ -1044,8 +1044,9 @@ static int udphy_get_initial_status(struct rockchip_udphy *udphy)
 	return 0;
 }
 
-static int udphy_parse_dt(struct rockchip_udphy *udphy, struct device *dev)
+static int udphy_parse_dt(struct rockchip_udphy *udphy)
 {
+	struct device *dev = udphy->dev;
 	struct device_node *np = dev->of_node;
 	enum usb_device_speed maximum_speed;
 	int ret;
@@ -1508,7 +1509,11 @@ static int usbdp_typec_mux_set(struct typec_mux_dev *mux,
 	if (state->alt && state->alt->svid == USB_TYPEC_DP_SID) {
 		struct typec_displayport_data *data = state->data;
 
-		if (!data) {
+		if (data)
+			dev_dbg(udphy->dev, "received DP status: 0x%08x, conf: 0x%08x mode:%lu\n",
+				data->status, data->conf, state->mode);
+
+		if (!data || state->mode < TYPEC_STATE_MODAL) {
 			udphy_dp_hpd_event_trigger(udphy, false);
 		} else if (data->status & DP_STATUS_IRQ_HPD) {
 			udphy_dp_hpd_event_trigger(udphy, false);
@@ -1619,7 +1624,8 @@ static int rockchip_udphy_probe(struct platform_device *pdev)
 	if (IS_ERR(udphy->pma_regmap))
 		return PTR_ERR(udphy->pma_regmap);
 
-	ret = udphy_parse_dt(udphy, dev);
+	udphy->dev = dev;
+	ret = udphy_parse_dt(udphy);
 	if (ret)
 		return ret;
 
@@ -1628,7 +1634,6 @@ static int rockchip_udphy_probe(struct platform_device *pdev)
 		return ret;
 
 	mutex_init(&udphy->mutex);
-	udphy->dev = dev;
 	platform_set_drvdata(pdev, udphy);
 
 	if (device_property_present(dev, "orientation-switch")) {

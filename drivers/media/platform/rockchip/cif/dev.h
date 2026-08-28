@@ -60,6 +60,8 @@
 #define RKCIF_PLANE_Y		0
 #define RKCIF_PLANE_CBCR	1
 
+#define ALIGN_ANY_SAFE(x, a) ((((x) - 1) / (a) + 1) * (a))
+
 /*
  * RK1808 support 5 channel inputs simultaneously:
  * dvp + 4 mipi virtual channels;
@@ -492,6 +494,8 @@ struct rkcif_rx_buffer {
 	u64 fe_timestamp;
 	bool is_init[RKCIF_MAX_DEV];
 	int use_cnt;
+	bool in_isp;
+	bool in_rx_list;
 };
 
 enum rkcif_dma_en_mode {
@@ -515,14 +519,14 @@ struct rkcif_sync_cfg {
 	u32 group;
 };
 
-enum rkcif_toisp_buf_update_state {
-	RKCIF_TOISP_BUF_ROTATE,
-	RKCIF_TOISP_BUF_THESAME,
-	RKCIF_TOISP_BUF_LOSS,
+enum rkcif_buf_update_state {
+	RKCIF_BUF_ROTATE,
+	RKCIF_BUF_THESAME,
+	RKCIF_BUF_LOSS,
 };
 
-struct rkcif_toisp_buf_state {
-	enum rkcif_toisp_buf_update_state state;
+struct rkcif_buf_state {
+	enum rkcif_buf_update_state state;
 	int check_cnt;
 	bool is_early_update;
 };
@@ -638,7 +642,7 @@ struct rkcif_stream {
 	atomic_t			buf_cnt;
 	struct completion		stop_complete;
 	struct completion		start_complete;
-	struct rkcif_toisp_buf_state	toisp_buf_state;
+	struct rkcif_buf_state		buf_state;
 	u32				skip_frame;
 	u32				cur_skip_frame;
 	int				thunderboot_skip_interval;
@@ -647,17 +651,23 @@ struct rkcif_stream {
 	struct rkcif_fence_context	fence_ctx;
 	struct rkcif_fence		*rkcif_fence;
 	struct list_head		qbuf_fence_list_head;
-	struct list_head		done_fence_list_head;
 	spinlock_t			fence_lock;
 	u32				rounding_bit;
-	int				frame_loss;
+	/* SOF arrived but FE missing (sum with fe_no_out = total loss) */
+	u64				frame_loss_fs_no_fe;
+	/* FE arrived but buffer not delivered (sum with fs_no_fe = total loss) */
+	u64				frame_loss_fe_no_out;
+	/* Buffers output to app/ISP path */
+	u64				frame_out_cnt;
 	struct kfifo			exp_kfifo;
 	struct kfifo			gain_kfifo;
 	struct kfifo			vts_kfifo;
 	struct kfifo			dcg_kfifo;
 	struct rkmodule_exp_delay	exp_delay;
 	struct rkmodule_exp_info	sensor_exp_info;
+	int				real_skip_num;
 	bool				stopping;
+	struct csi_channel_info		channel_info;
 	bool				crop_enable;
 	bool				crop_dyn_en;
 	bool				is_compact;
@@ -684,6 +694,9 @@ struct rkcif_stream {
 	bool				is_fb_first_frame;
 	bool				is_pause_stream;
 	bool				is_force_update;
+	bool				is_hold_stream_off;
+	bool				is_single_buf_mode;
+	bool				is_detect_lack_buf;
 };
 
 struct rkcif_lvds_subdev {
@@ -829,6 +842,8 @@ struct rkcif_scale_vdev {
 	int extrac_pattern;
 	int cur_stream_mode;
 	bool stopping;
+	bool is_compact;
+	bool is_high_align;
 };
 
 static inline
@@ -1088,6 +1103,8 @@ struct rkcif_device {
 	u32				unite_extend_pixel;
 	struct rkcif_switch_info	switch_info;
 	struct rkmodule_irfpa_info	irfpa_info;
+	int				prev_id;
+	u32				exp_mode;
 };
 
 extern struct platform_driver rkcif_plat_drv;

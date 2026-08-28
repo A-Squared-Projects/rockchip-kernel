@@ -5,6 +5,7 @@
  * Copyright (C) 2017 Rockchip Electronics Co., Ltd.
  * V0.0X01.0X00 init version.
  * V0.0X01.0X01 add 3968x2800 sequence
+ * V0.0X01.0X02 add 1920x1080@120 sequence
  *
  */
 
@@ -36,7 +37,7 @@
 #include <linux/rk-preisp.h>
 #include "otp_eeprom.h"
 
-#define DRIVER_VERSION			KERNEL_VERSION(0, 0x01, 0x01)
+#define DRIVER_VERSION			KERNEL_VERSION(0, 0x01, 0x02)
 
 #ifndef V4L2_CID_DIGITAL_GAIN
 #define V4L2_CID_DIGITAL_GAIN		V4L2_CID_GAIN
@@ -48,8 +49,8 @@
 
 #define IMX586_LANES			4
 
-#define PIXEL_RATE_WITH_848M_10BIT	(IMX586_LINK_FREQ_400 * 2 / 10 * 4)
-#define PIXEL_RATE_WITH_848M_12BIT	(IMX586_LINK_FREQ_400 * 2 / 12 * 4)
+#define IMX586_MAX_LINK_FREQ IMX586_LINK_FREQ_850
+#define IMX586_MAX_PIXEL_RATE		(IMX586_MAX_LINK_FREQ / 10 * 2 * IMX586_LANES)
 
 #define IMX586_XVCLK_FREQ		24000000
 
@@ -153,6 +154,7 @@ struct imx586_mode {
 	u32 hts_def;
 	u32 vts_def;
 	u32 exp_def;
+	u32 bpp;
 	const struct regval *global_reg_list;
 	const struct regval *reg_list;
 	u32 hdr_mode;
@@ -186,12 +188,11 @@ struct imx586 {
 	struct v4l2_ctrl	*pixel_rate;
 	struct v4l2_ctrl	*link_freq;
 	struct mutex		mutex;
+	struct v4l2_fract	cur_fps;
 	bool			streaming;
 	bool			power_on;
 	const struct imx586_mode *cur_mode;
 	u32			cfg_num;
-	u32			cur_pixel_rate;
-	u32			cur_link_freq;
 	u32			module_index;
 	const char		*module_facing;
 	const char		*module_name;
@@ -442,6 +443,124 @@ static const struct regval imx586_linear_10bit_4000x3000_30fps_nopd_regs[] = {
 	/* PDAF TYPE1 Setting */
 	{0x3E20, 0x01},
 	{0x3E37, 0x01},
+
+	{REG_NULL, 0x00},
+};
+
+static const struct regval imx586_linear_10bit_1920x1080_120fps_nopd_regs[] = {
+	/* MIPI output format setting */
+	{0x0112, 0x0A},
+	{0x0113, 0x0A},
+	{0x0114, 0x03},
+
+	/* Line Length PCK Setting */
+	{0x0342, 0x15},
+	{0x0343, 0x00},
+
+	/* Frame Length Lines Setting */
+	{0x0340, 0x09},
+	{0x0341, 0xE4},
+
+	/* ROI Setting */
+	{0x0344, 0x00},
+	{0x0345, 0xA0},
+	{0x0346, 0x03},
+	{0x0347, 0x48},
+	{0x0348, 0x1E},
+	{0x0349, 0x9F},
+	{0x034A, 0x14},
+	{0x034B, 0x27},
+
+	/* Mode Setting */
+	{0x0220, 0x62},
+	{0x0222, 0x01},
+	{0x0900, 0x01},
+	{0x0901, 0x44},
+	{0x0902, 0x08},
+	{0x3140, 0x00},
+	{0x3246, 0x89},
+	{0x3247, 0x89},
+	{0x3F15, 0x00},
+
+	/* Digital Crop & Scaling */
+	{0x0401, 0x00},
+	{0x0404, 0x00},
+	{0x0405, 0x10},
+	{0x0408, 0x00},
+	{0x0409, 0x00},
+	{0x040A, 0x00},
+	{0x040B, 0x00},
+	{0x040C, 0x07},
+	{0x040D, 0x80},
+	{0x040E, 0x04},
+	{0x040F, 0x38},
+
+	/* Output Size Setting */
+	{0x034C, 0x07},
+	{0x034D, 0x80},
+	{0x034E, 0x04},
+	{0x034F, 0x38},
+
+	/* Clock Setting */
+	{0x0301, 0x05}, // IVT_PXCK_DIV for {5}
+	{0x0303, 0x04}, // IVT_SYCK_DIV for {2,4}
+	{0x0305, 0x04},
+	{0x0306, 0x01},
+	{0x0307, 0x58},
+	{0x030B, 0x01}, // IOP_SYCK_DIV for {1, 2, 4}
+	{0x030D, 0x03},
+	{0x030E, 0x01},
+	{0x030F, 0x1F},
+	{0x0310, 0x01},
+
+	/* Other Setting */
+	{0x3620, 0x00},
+	{0x3621, 0x00},
+	{0x3C11, 0x04},
+	{0x3C12, 0x03},
+	{0x3C13, 0x2D},
+	{0x3F0C, 0x00},
+	{0x3F14, 0x00},
+	{0x3F80, 0x01},
+	{0x3F81, 0x90},
+	{0x3F8C, 0x00},
+	{0x3F8D, 0x14},
+	{0x3FF8, 0x01},
+	{0x3FF9, 0x2A},
+	{0x3FFE, 0x00},
+	{0x3FFF, 0x6C},
+
+	/* Integration Setting */
+	{0x0202, 0x09},
+	{0x0203, 0xB4},
+	{0x0224, 0x01},
+	{0x0225, 0xF4},
+	{0x3FE0, 0x01},
+	{0x3FE1, 0xF4},
+
+	/* Gain Setting */
+	{0x0204, 0x00},
+	{0x0205, 0x70},
+	{0x0216, 0x00},
+	{0x0217, 0x70},
+	{0x0218, 0x01},
+	{0x0219, 0x00},
+	{0x020E, 0x01},
+	{0x020F, 0x00},
+	{0x0210, 0x01},
+	{0x0211, 0x00},
+	{0x0212, 0x01},
+	{0x0213, 0x00},
+	{0x0214, 0x01},
+	{0x0215, 0x00},
+	{0x3FE2, 0x00},
+	{0x3FE3, 0x70},
+	{0x3FE4, 0x01},
+	{0x3FE5, 0x00},
+
+	/* PDAF TYPE1 Setting */
+	{0x3E20, 0x00},
+	{0x3E37, 0x00},
 
 	{REG_NULL, 0x00},
 };
@@ -1125,6 +1244,7 @@ static const struct imx586_mode supported_modes[] = {
 		.reg_list = imx586_linear_10bit_4000x3000_30fps_nopd_regs,
 		.hdr_mode = NO_HDR,
 		.mipi_freq_idx = 0,
+		.bpp = 10,
 		.vc[PAD0] = 0,
 	},
 	{
@@ -1142,6 +1262,7 @@ static const struct imx586_mode supported_modes[] = {
 		.reg_list = imx586_linear_10bit_full_raw_6fps_regs,
 		.hdr_mode = NO_HDR,
 		.mipi_freq_idx = 0,
+		.bpp = 10,
 		.vc[PAD0] = 0,
 	},
 	{
@@ -1159,6 +1280,7 @@ static const struct imx586_mode supported_modes[] = {
 		.reg_list = imx586_linear_10bit_full_remosaic_6fps_regs,
 		.hdr_mode = NO_HDR,
 		.mipi_freq_idx = 0,
+		.bpp = 10,
 		.vc[PAD0] = 0,
 	},
 	{
@@ -1176,6 +1298,7 @@ static const struct imx586_mode supported_modes[] = {
 		.reg_list = imx586_linear_10bit_full_remosaic_10fps_regs,
 		.hdr_mode = NO_HDR,
 		.mipi_freq_idx = 1,
+		.bpp = 10,
 		.vc[PAD0] = 0,
 	},
 	{
@@ -1193,6 +1316,25 @@ static const struct imx586_mode supported_modes[] = {
 		.reg_list = imx586_linear_10bit_3968x2800_30fps_1700mbps_nopd_regs,
 		.hdr_mode = NO_HDR,
 		.mipi_freq_idx = 2,
+		.bpp = 10,
+		.vc[PAD0] = 0,
+	},
+	{
+		.width = 1920,
+		.height = 1080,
+		.max_fps = {
+			.numerator = 10000,
+			.denominator = 1200000,
+		},
+		.exp_def = 0x0200,
+		.hts_def = 0x1500,
+		.vts_def = 0x04FF,
+		.bus_fmt = MEDIA_BUS_FMT_SRGGB10_1X10,
+		.global_reg_list = imx586_linear_10bit_1700mbps_global_regs,
+		.reg_list = imx586_linear_10bit_1920x1080_120fps_nopd_regs,
+		.hdr_mode = NO_HDR,
+		.mipi_freq_idx = 2,
+		.bpp = 10,
 		.vc[PAD0] = 0,
 	},
 };
@@ -1363,8 +1505,8 @@ static int imx586_set_fmt(struct v4l2_subdev *sd,
 					 pixel_rate);
 	}
 
-	dev_info(&imx586->client->dev, "%s: mode->mipi_freq_idx(%d)",
-		 __func__, mode->mipi_freq_idx);
+	dev_info(&imx586->client->dev, "%s: width: %d, height: %d, mipi_freq_idx: %d\n",
+		 __func__, mode->width, mode->height, mode->mipi_freq_idx);
 
 	mutex_unlock(&imx586->mutex);
 
@@ -1464,7 +1606,80 @@ static int imx586_g_frame_interval(struct v4l2_subdev *sd,
 	struct imx586 *imx586 = to_imx586(sd);
 	const struct imx586_mode *mode = imx586->cur_mode;
 
-	fi->interval = mode->max_fps;
+	if (imx586->streaming)
+		fi->interval = imx586->cur_fps;
+	else
+		fi->interval = mode->max_fps;
+
+	return 0;
+}
+
+static const struct imx586_mode *imx586_find_mode(struct imx586 *imx586, int fps)
+{
+	const struct imx586_mode *mode = NULL;
+	const struct imx586_mode *match = NULL;
+	int cur_fps = 0;
+	int i = 0;
+
+	for (i = 0; i < imx586->cfg_num; i++) {
+		mode = &supported_modes[i];
+		if (mode->width == imx586->cur_mode->width &&
+		    mode->height == imx586->cur_mode->height &&
+		    mode->hdr_mode == imx586->cur_mode->hdr_mode &&
+		    mode->bus_fmt == imx586->cur_mode->bus_fmt) {
+			cur_fps = DIV_ROUND_CLOSEST(mode->max_fps.denominator, mode->max_fps.numerator);
+			if (cur_fps == fps) {
+				match = mode;
+				break;
+			}
+		}
+	}
+	return match;
+}
+
+static int imx586_s_frame_interval(struct v4l2_subdev *sd,
+				    struct v4l2_subdev_frame_interval *fi)
+{
+	struct imx586 *imx586 = to_imx586(sd);
+	const struct imx586_mode *mode = NULL;
+	struct v4l2_fract *fract = &fi->interval;
+	s64 h_blank, vblank_def;
+	u64 pixel_rate = 0;
+	int fps;
+
+	if (imx586->streaming)
+		return -EBUSY;
+
+	if (fi->pad != 0)
+		return -EINVAL;
+
+	if (fract->numerator == 0) {
+		v4l2_err(sd, "error param, check interval param\n");
+		return -EINVAL;
+	}
+	fps = DIV_ROUND_CLOSEST(fract->denominator, fract->numerator);
+	mode = imx586_find_mode(imx586, fps);
+	if (mode == NULL) {
+		v4l2_err(sd, "couldn't match fi\n");
+		return -EINVAL;
+	}
+
+	imx586->cur_mode = mode;
+
+	h_blank = mode->hts_def - mode->width;
+	__v4l2_ctrl_modify_range(imx586->hblank, h_blank,
+				 h_blank, 1, h_blank);
+	vblank_def = mode->vts_def - mode->height;
+	__v4l2_ctrl_modify_range(imx586->vblank, vblank_def,
+				 IMX586_VTS_MAX - mode->height,
+				 1, vblank_def);
+	__v4l2_ctrl_s_ctrl(imx586->link_freq, mode->mipi_freq_idx);
+	pixel_rate = (u32)link_freq_items[mode->mipi_freq_idx] /
+		     mode->bpp * 2 * IMX586_LANES;
+	__v4l2_ctrl_s_ctrl_int64(imx586->pixel_rate, pixel_rate);
+	imx586->cur_fps = mode->max_fps;
+	imx586->cur_vts = mode->vts_def;
+	v4l2_info(sd, "%s: fps: %d\n", __func__, fps);
 
 	return 0;
 }
@@ -1604,6 +1819,7 @@ static long imx586_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 	long ret = 0;
 	u32 i, h, w;
 	u32 stream = 0;
+	u64 pixel_rate = 0;
 
 	switch (cmd) {
 	case PREISP_CMD_SET_HDRAE_EXP:
@@ -1644,22 +1860,14 @@ static long imx586_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 						 imx586->cur_mode->height,
 						 1, h);
 
-			if (imx586->cur_mode->bus_fmt ==
-			    MEDIA_BUS_FMT_SRGGB10_1X10) {
-				imx586->cur_link_freq = 0;
-				imx586->cur_pixel_rate =
-				PIXEL_RATE_WITH_848M_10BIT;
-			} else if (imx586->cur_mode->bus_fmt ==
-				   MEDIA_BUS_FMT_SRGGB12_1X12) {
-				imx586->cur_link_freq = 0;
-				imx586->cur_pixel_rate =
-				PIXEL_RATE_WITH_848M_12BIT;
-			}
-
-			__v4l2_ctrl_s_ctrl_int64(imx586->pixel_rate,
-						 imx586->cur_pixel_rate);
 			__v4l2_ctrl_s_ctrl(imx586->link_freq,
-					   imx586->cur_link_freq);
+					   imx586->cur_mode->mipi_freq_idx);
+			pixel_rate = (u32)link_freq_items[imx586->cur_mode->mipi_freq_idx] /
+				     imx586->cur_mode->bpp * 2 * IMX586_LANES;
+			__v4l2_ctrl_s_ctrl_int64(imx586->pixel_rate,
+						 pixel_rate);
+			imx586->cur_fps = imx586->cur_mode->max_fps;
+			imx586->cur_vts = imx586->cur_mode->vts_def;
 		}
 		break;
 	case RKMODULE_SET_QUICK_STREAM:
@@ -2094,6 +2302,7 @@ static const struct v4l2_subdev_core_ops imx586_core_ops = {
 static const struct v4l2_subdev_video_ops imx586_video_ops = {
 	.s_stream = imx586_s_stream,
 	.g_frame_interval = imx586_g_frame_interval,
+	.s_frame_interval = imx586_s_frame_interval,
 };
 
 static const struct v4l2_subdev_pad_ops imx586_pad_ops = {
@@ -2263,6 +2472,7 @@ static int imx586_initialize_controls(struct imx586 *imx586)
 	struct v4l2_ctrl_handler *handler;
 	s64 exposure_max, vblank_def;
 	u32 h_blank;
+	u64 pixel_rate = 0;
 	int ret;
 
 	handler = &imx586->ctrl_handler;
@@ -2276,21 +2486,14 @@ static int imx586_initialize_controls(struct imx586 *imx586)
 				V4L2_CID_LINK_FREQ,
 				ARRAY_SIZE(link_freq_items) - 1, 0,
 				link_freq_items);
+	v4l2_ctrl_s_ctrl(imx586->link_freq,
+			   mode->mipi_freq_idx);
 
-	if (imx586->cur_mode->bus_fmt == MEDIA_BUS_FMT_SRGGB10_1X10) {
-		imx586->cur_link_freq = 0;
-		imx586->cur_pixel_rate = PIXEL_RATE_WITH_848M_10BIT;
-	} else if (imx586->cur_mode->bus_fmt == MEDIA_BUS_FMT_SRGGB12_1X12) {
-		imx586->cur_link_freq = 0;
-		imx586->cur_pixel_rate = PIXEL_RATE_WITH_848M_12BIT;
-	}
-
+	pixel_rate = (u32)link_freq_items[mode->mipi_freq_idx] / mode->bpp * 2 * IMX586_LANES;
 	imx586->pixel_rate = v4l2_ctrl_new_std(handler, NULL,
 					       V4L2_CID_PIXEL_RATE,
-					       0, PIXEL_RATE_WITH_848M_10BIT,
-					       1, imx586->cur_pixel_rate);
-	v4l2_ctrl_s_ctrl(imx586->link_freq,
-			   imx586->cur_link_freq);
+					       0, IMX586_MAX_PIXEL_RATE,
+					       1, pixel_rate);
 
 	h_blank = mode->hts_def - mode->width;
 	imx586->hblank = v4l2_ctrl_new_std(handler, NULL, V4L2_CID_HBLANK,

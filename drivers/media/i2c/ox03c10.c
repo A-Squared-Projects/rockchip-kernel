@@ -6,7 +6,7 @@
  *
  * V0.0X01.0X01 first version.
  */
-
+//#define DEBUG
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/delay.h>
@@ -26,6 +26,7 @@
 #include <media/v4l2-subdev.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/crc32.h>
+#include <linux/limits.h>
 
 #define DRIVER_VERSION			KERNEL_VERSION(0, 0x01, 0x01)
 
@@ -195,6 +196,15 @@ struct ox03c10_mode {
 	u32 reg_list_crc;
 };
 
+struct ox03c10_reg_merge {
+	bool is_init;
+	u32 num_regs;
+	u32 *preg_addr;
+	u32 *preg_value;
+	u32 *preg_addr_bytes;
+	u32 *preg_value_bytes;
+};
+
 struct ox03c10 {
 	struct i2c_client	*client;
 	struct clk		*xvclk;
@@ -237,6 +247,7 @@ struct ox03c10 {
 	struct rkmodule_dcg_ratio dcg_ratio;
 	struct rkmodule_dcg_ratio spd_ratio;
 	struct rkmodule_lenc_gain lenc_gain;
+	struct ox03c10_reg_merge reg_merge;
 };
 
 #define to_ox03c10(sd) container_of(sd, struct ox03c10, subdev)
@@ -1283,7 +1294,7 @@ static const struct regval ox03c10_1920x1080_30fps_HDR3_SPD_PWL12_mipi600[] = {
 	{0x5d1f, 0x81},
 	{0x5d11, 0x00},
 	{0x5d12, 0x10},
-	{0x5d13, 0x10},
+	{0x5d13, 0x00},//lrk edited
 	{0x5d15, 0x05},
 	{0x5d16, 0x05},
 	{0x5d17, 0x05},
@@ -4033,7 +4044,7 @@ static const struct ox03c10_mode supported_modes[] = {
 		.hts_def = 0x10fe,
 		.vts_def = 0x02ae * 2,
 		.reg_list = ox03c10_1920x1080_30fps_HDR3_VS_PWL12_mipi600,
-		.hdr_mode = HDR_COMPR,
+		.hdr_mode = HDR_CIS_MERGE,
 		.hdr_compr = &ox03c10_hdr_compr_12,
 		.bpp = 12,
 		.mipi_freq_idx = 0,
@@ -4054,7 +4065,7 @@ static const struct ox03c10_mode supported_modes[] = {
 		.hts_def = 0x10FE,
 		.vts_def = 0x02AE * 2,
 		.reg_list = ox03c10_1920x1080_30fps_HDR3_LFM_PWL16_mipi996,
-		.hdr_mode = HDR_COMPR,
+		.hdr_mode = HDR_CIS_MERGE,
 		.hdr_compr = &ox03c10_hdr_compr_16,
 		.bpp = 16,
 		.mipi_freq_idx = 1,
@@ -4078,7 +4089,7 @@ static const struct ox03c10_mode supported_modes[] = {
 		.hts_def = 0x10fe,
 		.vts_def = 0x02ae * 2,
 		.reg_list = ox03c10_1920x1080_30fps_HDR3_SPD_PWL12_mipi600,
-		.hdr_mode = HDR_COMPR,
+		.hdr_mode = HDR_CIS_MERGE,
 		.hdr_compr = &ox03c10_hdr_compr_12,
 		.bpp = 12,
 		.mipi_freq_idx = 0,
@@ -4197,20 +4208,38 @@ ox03c10_find_best_fit(struct v4l2_subdev_format *fmt)
 {
 	struct v4l2_mbus_framefmt *framefmt = &fmt->format;
 	int dist;
-	int cur_best_fit = 0;
-	int cur_best_fit_dist = -1;
+	int best_idx = -1;
+	int min_reso_dist = INT_MAX;
 	unsigned int i, len = ARRAY_SIZE(supported_modes);
 
 	for (i = 0; i < len; i++) {
+		if (fmt->format.code != supported_modes[i].bus_fmt)
+			continue;
 		dist = ox03c10_get_reso_dist(&supported_modes[i], framefmt);
-		if ((cur_best_fit_dist == -1 || dist < cur_best_fit_dist) &&
-		    fmt->format.code == supported_modes[i].bus_fmt) {
-			cur_best_fit_dist = dist;
-			cur_best_fit = i;
+		if (dist < min_reso_dist) {
+			min_reso_dist = dist;
+			best_idx = i;
 		}
 	}
+	if (best_idx >= 0)
+		return &supported_modes[best_idx];
 
-	return &supported_modes[cur_best_fit];
+	/* No bus_fmt match: pick closest resolution (any format). */
+	pr_debug("ox03c10: find_best_fit: no bus_fmt for code=0x%x req=%ux%u, closest reso\n",
+		 fmt->format.code, framefmt->width, framefmt->height);
+	min_reso_dist = INT_MAX;
+	for (i = 0; i < len; i++) {
+		dist = ox03c10_get_reso_dist(&supported_modes[i], framefmt);
+		if (dist < min_reso_dist) {
+			min_reso_dist = dist;
+			best_idx = i;
+		}
+	}
+	pr_debug("ox03c10: find_best_fit: relaxed idx=%d fmt=0x%x %ux%u\n",
+		 best_idx, supported_modes[best_idx].bus_fmt,
+		 supported_modes[best_idx].width,
+		 supported_modes[best_idx].height);
+	return &supported_modes[best_idx];
 }
 
 static const struct ox03c10_mode *
@@ -4228,13 +4257,50 @@ ox03c10_find_operating_mode(int operating_mode)
 	return &supported_modes[cur_best_fit];
 }
 
+/**
+ * ox03c10_log_cur_mode_change - log cur_mode transition (dynamic debug).
+ * @caller: short caller id (e.g. "set_fmt") for the log line prefix.
+ * @old_mode: previous mode; may be NULL (printed as zeros).
+ */
+static void ox03c10_log_cur_mode_change(struct ox03c10 *ox03c10,
+					const char *caller,
+					const struct ox03c10_mode *old_mode)
+{
+	const struct ox03c10_mode *new_mode = ox03c10->cur_mode;
+
+	if (!new_mode) {
+		dev_warn(&ox03c10->client->dev, "%s: cur_mode is NULL\n", caller);
+		return;
+	}
+
+	dev_dbg(&ox03c10->client->dev,
+		"%s: old %ux%u hdr=%u op=%u exp=%u sm=%u bpp=%u\n", caller,
+		old_mode ? old_mode->width : 0, old_mode ? old_mode->height : 0,
+		old_mode ? old_mode->hdr_mode : 0,
+		old_mode ? old_mode->hdr_operating_mode : 0,
+		old_mode ? old_mode->exp_mode : 0,
+		old_mode ? old_mode->single_mode : 0,
+		old_mode ? old_mode->bpp : 0);
+	dev_dbg(&ox03c10->client->dev,
+		"%s: new %ux%u hdr=%u op=%u exp=%u sm=%u bpp=%u\n", caller,
+		new_mode->width, new_mode->height, new_mode->hdr_mode,
+		new_mode->hdr_operating_mode, new_mode->exp_mode,
+		new_mode->single_mode, new_mode->bpp);
+}
+
 static int ox03c10_set_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_subdev_state *sd_state,
 			  struct v4l2_subdev_format *fmt)
 {
 	struct ox03c10 *ox03c10 = to_ox03c10(sd);
 	const struct ox03c10_mode *mode;
+	const struct ox03c10_mode *old_mode;
 	s64 h_blank, vblank_def;
+
+	dev_dbg(&ox03c10->client->dev,
+		"set_fmt: which=%u pad=%u req=%ux%u code=0x%x\n",
+		 fmt->which, fmt->pad, fmt->format.width, fmt->format.height,
+		 fmt->format.code);
 
 	mutex_lock(&ox03c10->mutex);
 
@@ -4251,7 +4317,10 @@ static int ox03c10_set_fmt(struct v4l2_subdev *sd,
 		return -ENOTTY;
 #endif
 	} else {
+		old_mode = ox03c10->cur_mode;
 		ox03c10->cur_mode = mode;
+		if (old_mode != mode)
+			ox03c10_log_cur_mode_change(ox03c10, "set_fmt", old_mode);
 		h_blank = mode->hts_def - mode->width;
 		__v4l2_ctrl_modify_range(ox03c10->hblank, h_blank,
 					 h_blank, 1, h_blank);
@@ -4261,8 +4330,8 @@ static int ox03c10_set_fmt(struct v4l2_subdev *sd,
 					 1, vblank_def);
 	}
 
-	dev_err(&ox03c10->client->dev,
-			"Set format done!(cur_mode:%d)\n", mode->hdr_mode);
+	dev_dbg(&ox03c10->client->dev, "set_fmt done hdr_mode=%d\n",
+		mode->hdr_mode);
 
 	mutex_unlock(&ox03c10->mutex);
 
@@ -4673,12 +4742,12 @@ static int ox03c10_set_wb_gain(struct ox03c10 *ox03c10,
 					 OX03C10_REG_VALUE_16BIT, wb_gain.gb_gain & 0xffff);
 		ret |= ox03c10_write_reg(ox03c10->client, reg_rgain,
 					 OX03C10_REG_VALUE_16BIT, wb_gain.r_gain & 0xffff);
-		dev_info(&ox03c10->client->dev,
-			 "write wb gain, type:%d, b:0x%x, gb:0x%x, gr:0x%x, r:0x%x\n",
-			 wb_gain_group->wb_gain_type[i],
-			 wb_gain.b_gain, wb_gain.gb_gain,
-			 wb_gain.gr_gain, wb_gain.r_gain);
 #ifdef DEBUG
+		dev_dbg(&ox03c10->client->dev,
+			"wb_gain wr type=%d b=0x%x gb=0x%x gr=0x%x r=0x%x\n",
+			wb_gain_group->wb_gain_type[i],
+			wb_gain.b_gain, wb_gain.gb_gain,
+			wb_gain.gr_gain, wb_gain.r_gain);
 		ret |= ox03c10_read_reg(ox03c10->client, reg_bgain,
 					OX03C10_REG_VALUE_16BIT, &bgain);
 		ret |= ox03c10_read_reg(ox03c10->client, reg_gbgain,
@@ -4687,9 +4756,9 @@ static int ox03c10_set_wb_gain(struct ox03c10 *ox03c10,
 					OX03C10_REG_VALUE_16BIT, &grgain);
 		ret |= ox03c10_read_reg(ox03c10->client, reg_rgain,
 					OX03C10_REG_VALUE_16BIT, &rgain);
-		dev_info(&ox03c10->client->dev,
-			 "read wb gain, type %d, b:0x%x, gb:0x%x, gr:0x%x, r:0x%x\n",
-			 wb_gain_group->wb_gain_type[i], bgain, gbgain, grgain, rgain);
+		dev_dbg(&ox03c10->client->dev,
+			"wb_gain rd type=%d b=0x%x gb=0x%x gr=0x%x r=0x%x\n",
+			wb_gain_group->wb_gain_type[i], bgain, gbgain, grgain, rgain);
 #endif
 	}
 	return ret;
@@ -4733,16 +4802,15 @@ static int ox03c10_set_blc(struct ox03c10 *ox03c10,
 		blc_val = blc_group->blc[i];
 		ret = ox03c10_write_reg(ox03c10->client, reg_blc,
 					OX03C10_REG_VALUE_16BIT, blc_val & 0x3ff);
-		dev_info(&ox03c10->client->dev,
-			 "write blc, type:%d, blc_val:0x%x\n",
-			 blc_group->blc_type[i],
-			 blc_val);
+		dev_dbg(&ox03c10->client->dev,
+			"write blc, type:%d, blc_val:0x%x\n",
+			blc_group->blc_type[i],
+			blc_val);
 #ifdef DEBUG
 		ret |= ox03c10_read_reg(ox03c10->client, reg_blc,
 					OX03C10_REG_VALUE_16BIT, &blc_val);
-		dev_info(&ox03c10->client->dev,
-			 "read blc, type %d, blc_val:0x%x\n",
-			 blc_group->blc_type[i], blc_val);
+		dev_dbg(&ox03c10->client->dev, "blc rd type=%d val=0x%x\n",
+			blc_group->blc_type[i], blc_val);
 #endif
 	}
 	if (blc_group->reg_num > RKMODULE_REG_LIST_MAX) {
@@ -4775,27 +4843,62 @@ static int ox03c10_get_channel_info(struct ox03c10 *ox03c10, struct rkmodule_cha
 static int ox03c10_select_exp_mode(struct ox03c10 *ox03c10, u32 exp_mode)
 {
 	int ret = -EINVAL;
-	u32 i, h, w, hdr_mode;
+	u32 i, h, w, hdr_mode, bpp;
+	int bpp_match_idx = -1;
+	int fallback_idx = -1;
+	const struct ox03c10_mode *old_mode;
+	struct device *dev = &ox03c10->client->dev;
+
+	dev_dbg(dev, "select_exp_mode: exp=%u cur %ux%u hdr=%u op=%u bpp=%u\n",
+		exp_mode,
+		ox03c10->cur_mode ? ox03c10->cur_mode->width : 0,
+		ox03c10->cur_mode ? ox03c10->cur_mode->height : 0,
+		ox03c10->cur_mode ? ox03c10->cur_mode->hdr_mode : 0,
+		ox03c10->cur_mode ? ox03c10->cur_mode->hdr_operating_mode : 0,
+		ox03c10->cur_mode ? ox03c10->cur_mode->bpp : 0);
 
 	w = ox03c10->cur_mode->width;
 	h = ox03c10->cur_mode->height;
 	hdr_mode = ox03c10->cur_mode->hdr_mode;
+	bpp = ox03c10->cur_mode->bpp;
+
 	for (i = 0; i < ARRAY_SIZE(supported_modes); i++) {
 		if (w == supported_modes[i].width &&
 		    h == supported_modes[i].height &&
 		    supported_modes[i].hdr_mode == hdr_mode &&
 		    supported_modes[i].exp_mode == exp_mode) {
-			ox03c10->cur_mode = &supported_modes[i];
-			w = ox03c10->cur_mode->hts_def - ox03c10->cur_mode->width;
-			h = ox03c10->cur_mode->vts_def - ox03c10->cur_mode->height;
-			__v4l2_ctrl_modify_range(ox03c10->hblank, w, w, 1, w);
-			__v4l2_ctrl_modify_range(ox03c10->vblank, h,
-				OX03C10_VTS_MAX - ox03c10->cur_mode->height, 1, h);
-			ret = 0;
-			break;
+			if (supported_modes[i].bpp == bpp) {
+				bpp_match_idx = i;
+				break;
+			}
+			if (fallback_idx < 0)
+				fallback_idx = i;
 		}
 	}
-	return ret;
+
+	if (bpp_match_idx >= 0) {
+		i = (u32)bpp_match_idx;
+	} else if (fallback_idx >= 0) {
+		i = (u32)fallback_idx;
+		dev_dbg(dev,
+			"select_exp_mode: bpp fallback exp=%u cur_bpp=%u -> bpp=%u idx=%u\n",
+			exp_mode, bpp, supported_modes[i].bpp, i);
+	} else {
+		dev_dbg(dev,
+			"select_exp_mode: no match exp=%u %ux%u hdr=%u bpp=%u\n",
+			exp_mode, w, h, hdr_mode, bpp);
+		return ret;
+	}
+
+	old_mode = ox03c10->cur_mode;
+	ox03c10->cur_mode = &supported_modes[i];
+	ox03c10_log_cur_mode_change(ox03c10, "select_exp_mode", old_mode);
+	w = ox03c10->cur_mode->hts_def - ox03c10->cur_mode->width;
+	h = ox03c10->cur_mode->vts_def - ox03c10->cur_mode->height;
+	__v4l2_ctrl_modify_range(ox03c10->hblank, w, w, 1, w);
+	__v4l2_ctrl_modify_range(ox03c10->vblank, h,
+		OX03C10_VTS_MAX - ox03c10->cur_mode->height, 1, h);
+	return 0;
 }
 
 static int ox03c10_select_cmps_mode(struct ox03c10 *ox03c10, u32 cmps_mode)
@@ -4804,6 +4907,16 @@ static int ox03c10_select_cmps_mode(struct ox03c10 *ox03c10, u32 cmps_mode)
 	u32 i, h, w, hdr_mode, exp_mode;
 	int best_fit = -1;
 	int bit_width = 0;
+	const struct ox03c10_mode *old_mode;
+
+	dev_dbg(&ox03c10->client->dev,
+		"select_cmps_mode: cmps=%u cur %ux%u hdr=%u op=%u exp=%u\n",
+		cmps_mode,
+		ox03c10->cur_mode ? ox03c10->cur_mode->width : 0,
+		ox03c10->cur_mode ? ox03c10->cur_mode->height : 0,
+		ox03c10->cur_mode ? ox03c10->cur_mode->hdr_mode : 0,
+		ox03c10->cur_mode ? ox03c10->cur_mode->hdr_operating_mode : 0,
+		ox03c10->cur_mode ? ox03c10->cur_mode->exp_mode : 0);
 
 	w = ox03c10->cur_mode->width;
 	h = ox03c10->cur_mode->height;
@@ -4834,7 +4947,9 @@ static int ox03c10_select_cmps_mode(struct ox03c10 *ox03c10, u32 cmps_mode)
 		}
 	}
 	if (best_fit >= 0) {
-		ox03c10->cur_mode = &supported_modes[i];
+		old_mode = ox03c10->cur_mode;
+		ox03c10->cur_mode = &supported_modes[best_fit];
+		ox03c10_log_cur_mode_change(ox03c10, "select_cmps_mode", old_mode);
 		w = ox03c10->cur_mode->hts_def - ox03c10->cur_mode->width;
 		h = ox03c10->cur_mode->vts_def - ox03c10->cur_mode->height;
 		__v4l2_ctrl_modify_range(ox03c10->hblank, w, w, 1, w);
@@ -4849,6 +4964,15 @@ static int ox03c10_select_expand_single_mode(struct ox03c10 *ox03c10, u32 single
 {
 	int ret = -EINVAL;
 	u32 i, h, w, hdr_mode;
+	const struct ox03c10_mode *old_mode;
+
+	dev_dbg(&ox03c10->client->dev,
+		"select_expand_single_mode: sm=%u cur %ux%u hdr=%u op=%u\n",
+		single_mode,
+		ox03c10->cur_mode ? ox03c10->cur_mode->width : 0,
+		ox03c10->cur_mode ? ox03c10->cur_mode->height : 0,
+		ox03c10->cur_mode ? ox03c10->cur_mode->hdr_mode : 0,
+		ox03c10->cur_mode ? ox03c10->cur_mode->hdr_operating_mode : 0);
 
 	w = ox03c10->cur_mode->width;
 	h = ox03c10->cur_mode->height;
@@ -4858,7 +4982,9 @@ static int ox03c10_select_expand_single_mode(struct ox03c10 *ox03c10, u32 single
 		    h == supported_modes[i].height &&
 		    supported_modes[i].hdr_mode == hdr_mode) {
 			if (supported_modes[i].single_mode == single_mode) {
+				old_mode = ox03c10->cur_mode;
 				ox03c10->cur_mode = &supported_modes[i];
+				ox03c10_log_cur_mode_change(ox03c10, "select_expand_single_mode", old_mode);
 				w = ox03c10->cur_mode->hts_def - ox03c10->cur_mode->width;
 				h = ox03c10->cur_mode->vts_def - ox03c10->cur_mode->height;
 				__v4l2_ctrl_modify_range(ox03c10->hblank, w, w, 1, w);
@@ -4897,11 +5023,9 @@ static int ox03c10_set_lenc(struct ox03c10 *ox03c10,
 		ret |= ox03c10_write_reg(ox03c10->client, 0x5aa0 + i,
 					 OX03C10_REG_VALUE_08BIT, lenc_gain->r[i]);
 #ifdef DEBUG
-		dev_info(&ox03c10->client->dev,
-			 "write lenc, g:0x%x,0x%x b:0x%x,0x%x r:0x%x,0x%x\n",
-			 0x5a20 + i, lenc_gain->g[i],
-			 0x5a60 + i, lenc_gain->b[i],
-			 0x5aa0 + i, lenc_gain->r[i]);
+		dev_dbg(&ox03c10->client->dev,
+			"lenc i=%d g=0x%x b=0x%x r=0x%x\n", i,
+			lenc_gain->g[i], lenc_gain->b[i], lenc_gain->r[i]);
 #endif
 	}
 	return ret;
@@ -4937,6 +5061,180 @@ static int ox03c10_set_reg_setting(struct ox03c10 *ox03c10,
 	return ret;
 }
 
+static void ox03c10_write_reg_merge_group(struct ox03c10 *ox03c10)
+{
+	int i, ret;
+
+	if (ox03c10->reg_merge.is_init) {
+		for (i = 0; i < ox03c10->reg_merge.num_regs; i++) {
+			dev_dbg(&ox03c10->client->dev, "ox03c10 reg 0x%x, reg_bytes %u, val 0x%x, val_bytes %u\n",
+				ox03c10->reg_merge.preg_addr[i], ox03c10->reg_merge.preg_addr_bytes[i],
+				ox03c10->reg_merge.preg_value[i], ox03c10->reg_merge.preg_value_bytes[i]);
+			ret = ox03c10_write_reg(ox03c10->client,
+					       (u32)ox03c10->reg_merge.preg_addr[i],
+					       (u32)ox03c10->reg_merge.preg_value_bytes[i],
+					       (u32)ox03c10->reg_merge.preg_value[i]);
+			if (ret)
+				dev_err(&ox03c10->client->dev, "failed to write reg by ox03c10_write_reg\n");
+		}
+	}
+}
+
+static int find_segment(u16 value, u16 array[], int size)
+{
+	if (value < array[0])
+		return -1;
+	if (value > array[size - 1])
+		return size - 1;
+
+	for (int i = 0; i < size - 1; i++) {
+		if (value >= array[i] && value <= array[i + 1])
+			return i;
+	}
+
+	return size - 2;
+}
+
+static unsigned int linear_interpolate(u16 x, u16 x0, u16 y0, u16 x1, u16 y1)
+{
+	if (x1 == x0)
+		return y0;
+	return y0 + (x - x0) * (y1 - y0) / (x1 - x0);
+}
+
+
+static unsigned int bilinear_interpolate(u16 x, u16 y,
+					u16 x_values[], u16 y_values[],
+					u16 weights[5][5])
+{
+	int x_segment = find_segment(x, x_values, 5);
+	int y_segment = find_segment(y, y_values, 5);
+
+	if (x_segment < 0 || x_segment >= 4 || y_segment < 0 || y_segment >= 4) {
+		if (x_segment < 0)
+			x_segment = 0;
+		if (x_segment >= 4)
+			x_segment = 4;
+		if (y_segment < 0)
+			y_segment = 0;
+		if (y_segment >= 4)
+			y_segment = 4;
+		return weights[x_segment][y_segment];
+	}
+
+	unsigned int x0 = x_values[x_segment];
+	unsigned int x1 = x_values[x_segment + 1];
+	unsigned int y0 = y_values[y_segment];
+	unsigned int y1 = y_values[y_segment + 1];
+
+	unsigned int w00 = weights[x_segment][y_segment];
+	unsigned int w01 = weights[x_segment][y_segment + 1];
+	unsigned int w10 = weights[x_segment + 1][y_segment];
+	unsigned int w11 = weights[x_segment + 1][y_segment + 1];
+
+	// do linear_interpolate tiwce in y-axis
+	unsigned int w0 = linear_interpolate(y, y0, w00, y1, w01);
+	unsigned int w1 = linear_interpolate(y, y0, w10, y1, w11);
+
+	return linear_interpolate(x, x0, w0, x1, w1);
+}
+
+static void create17x17weight_table(u16 x_values[], u16 y_values[],
+				   u16 weights[5][5], u16 output[17][17])
+{
+	unsigned int target_x[17], target_y[17];
+
+	for (int i = 0; i < 17; i++) {
+		target_x[i] = i * 1024 / 16;
+		target_y[i] = i * 1024 / 16;
+	}
+
+	for (int i = 0; i < 17; i++) {
+		for (int j = 0; j < 17; j++)
+			output[i][j] = bilinear_interpolate(target_x[i], target_y[j],
+				x_values, y_values, weights);
+	}
+}
+
+static int ox03c10_get_merge_curve(struct ox03c10 *ox03c10,
+				   struct rkmodule_mge_oewgt *merge_curve)
+{
+	u32 val = 0, base_addr = 0, idx_lluma_base_addr = 0x5ba8;
+	u32 idx_sluma_base_addr = 0x5bae, weight_abase_addr = 0x5b8a;
+	u32 offset_addr[2] = {0x80, 0x100};
+	int ret = 0;
+	int i, j, curve_num;
+
+	merge_curve->wgtcurve_num = 2;
+	for (i = 0; i < 17; i++) {
+		merge_curve->wgtcurve[0].idx[i] = i * 1024 / 16;
+		merge_curve->wgtcurve[1].idx[i] = i * 1024 / 16;
+	}
+
+	for (curve_num = 0; curve_num < merge_curve->wgtcurve_num; curve_num++) {
+		//read original weight table between two frame
+		u16 ori_idx_lluma[5], ori_idx_sluma[5], ori_weights[5][5];
+
+		base_addr = idx_lluma_base_addr + offset_addr[curve_num];
+		ori_idx_lluma[0] = 0;
+		for (i = 1; i < 4; i++) {
+			ret |= ox03c10_read_reg(ox03c10->client, base_addr + 2 * (i - 1),
+						OX03C10_REG_VALUE_16BIT, &val);
+			ori_idx_lluma[i] = val & 0x3ff;
+		}
+		ori_idx_lluma[4] = 0x3ff;
+
+		base_addr = idx_sluma_base_addr + offset_addr[curve_num];
+		ori_idx_sluma[0] = 0;
+		for (i = 1; i < 4; i++) {
+			ret |= ox03c10_read_reg(ox03c10->client, base_addr + 2 * (i - 1),
+						OX03C10_REG_VALUE_16BIT, &val);
+			ori_idx_sluma[i] = val & 0x3ff;
+		}
+		ori_idx_sluma[4] = 0x3ff;
+
+		base_addr = weight_abase_addr + offset_addr[curve_num];
+		for (j = 0; j < 5; j++) {
+			for (i = 0; i < 5; i++) {
+				ret |= ox03c10_read_reg(ox03c10->client, base_addr + i + 5 * j,
+							OX03C10_REG_VALUE_08BIT, &val);
+				ori_weights[i][j] = val & 0xff;
+				ori_weights[i][j] = ori_weights[i][j] > 0x80 ? 0x80 : ori_weights[i][j];
+				ori_weights[i][j] = 0x80 - ori_weights[i][j];
+			}
+		}
+
+		//change original weight table to new weight table, and normalize
+		u16 new_weights[17][17];
+
+		create17x17weight_table(ori_idx_lluma, ori_idx_sluma, ori_weights, new_weights);
+		for (int i = 0; i < 17; i++)
+			merge_curve->wgtcurve[curve_num].val[i] = 8 * new_weights[i][i];
+
+#ifdef DEBUG
+		dev_dbg(&ox03c10->client->dev, "merge wgt curve=%d\n", curve_num);
+		dev_dbg(&ox03c10->client->dev,
+			"ori_idx_lluma %d %d %d %d %d\n",
+			ori_idx_lluma[0], ori_idx_lluma[1], ori_idx_lluma[2],
+			ori_idx_lluma[3], ori_idx_lluma[4]);
+		dev_dbg(&ox03c10->client->dev,
+			"ori_idx_sluma %d %d %d %d %d\n",
+			ori_idx_sluma[0], ori_idx_sluma[1], ori_idx_sluma[2],
+			ori_idx_sluma[3], ori_idx_sluma[4]);
+		for (int i = 0; i < 5; i++)
+			dev_dbg(&ox03c10->client->dev,
+				"ori_w[%d] %d %d %d %d %d\n", i,
+				ori_weights[i][0], ori_weights[i][1],
+				ori_weights[i][2], ori_weights[i][3], ori_weights[i][4]);
+		for (int i = 0; i < 17; i++)
+			dev_dbg(&ox03c10->client->dev, "wgt x=y=%d val=%d\n", i * 64,
+				merge_curve->wgtcurve[curve_num].val[i]);
+#endif
+	}
+
+	return 0;
+}
+
 static long ox03c10_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 {
 	struct ox03c10 *ox03c10 = to_ox03c10(sd);
@@ -4955,6 +5253,16 @@ static long ox03c10_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 	struct rkmodule_lenc_gain *lenc_gain;
 	struct rkmodule_reg_setting *reg_setting;
 	struct rkmodule_hdr_compr_single_frame_info *single_frame_info;
+	struct rkmodule_hdr_compr *compr_param;
+	struct rkmodule_reg_group *reg_s;
+	u32 *preg_addr = NULL;
+	u32 *preg_value = NULL;
+	u32 *preg_addr_bytes = NULL;
+	u32 *preg_value_bytes = NULL;
+	int lens;
+	void __user *up;
+	uintptr_t user_ptr;
+	struct rkmodule_mge_oewgt *merge_curve;
 
 	switch (cmd) {
 	case RKMODULE_GET_MODULE_INFO:
@@ -4964,12 +5272,19 @@ static long ox03c10_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 		hdr = (struct rkmodule_hdr_cfg *)arg;
 		hdr->esp.mode = HDR_NORMAL_VC;
 		hdr->hdr_mode = ox03c10->cur_mode->hdr_mode;
-		if (hdr->hdr_mode == HDR_COMPR)
+		if (hdr->hdr_mode == HDR_CIS_MERGE)
 			hdr->compr = *ox03c10->cur_mode->hdr_compr;
 		break;
 	case RKMODULE_SET_HDR_CFG:
 		hdr = (struct rkmodule_hdr_cfg *)arg;
-		if (ox03c10->cur_mode->hdr_mode == HDR_COMPR)
+		dev_dbg(&ox03c10->client->dev,
+			"ioctl_set_hdr_cfg: hdr_mode=%u cur=%ux%u cur_hdr=%u cur_hdr_op=%u\n",
+			 hdr->hdr_mode,
+			 ox03c10->cur_mode ? ox03c10->cur_mode->width : 0,
+			 ox03c10->cur_mode ? ox03c10->cur_mode->height : 0,
+			 ox03c10->cur_mode ? ox03c10->cur_mode->hdr_mode : 0,
+			 ox03c10->cur_mode ? ox03c10->cur_mode->hdr_operating_mode : 0);
+		if (ox03c10->cur_mode->hdr_mode == HDR_CIS_MERGE)
 			hdr->hdr_mode = ox03c10->cur_mode->hdr_mode;
 		w = ox03c10->cur_mode->width;
 		h = ox03c10->cur_mode->height;
@@ -4977,7 +5292,9 @@ static long ox03c10_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 			if (w == supported_modes[i].width &&
 			    h == supported_modes[i].height &&
 			    supported_modes[i].hdr_mode == hdr->hdr_mode) {
+				const struct ox03c10_mode *old_mode = ox03c10->cur_mode;
 				ox03c10->cur_mode = &supported_modes[i];
+				ox03c10_log_cur_mode_change(ox03c10, "ioctl_set_hdr_cfg", old_mode);
 				break;
 			}
 		}
@@ -5034,6 +5351,17 @@ static long ox03c10_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 		break;
 	case RKMODULE_SET_EXP_MODE:
 		ret = ox03c10_select_exp_mode(ox03c10, *(u32 *)arg);
+		if (ret)
+			dev_dbg(&ox03c10->client->dev,
+				"SET_EXP_MODE failed ret=%ld req_exp=%u cur: %ux%u code=0x%x hdr=%u hdr_op=%u exp=%u bpp=%u\n",
+				ret, *(u32 *)arg,
+				ox03c10->cur_mode ? ox03c10->cur_mode->width : 0,
+				ox03c10->cur_mode ? ox03c10->cur_mode->height : 0,
+				ox03c10->cur_mode ? ox03c10->cur_mode->bus_fmt : 0,
+				ox03c10->cur_mode ? ox03c10->cur_mode->hdr_mode : 0,
+				ox03c10->cur_mode ? ox03c10->cur_mode->hdr_operating_mode : 0,
+				ox03c10->cur_mode ? ox03c10->cur_mode->exp_mode : 0,
+				ox03c10->cur_mode ? ox03c10->cur_mode->bpp : 0);
 		break;
 	case RKMODULE_GET_WB_GAIN_INFO:
 		wb_gain_info = (struct rkmodule_wb_gain_info *)arg;
@@ -5046,6 +5374,17 @@ static long ox03c10_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 		break;
 	case RKMODULE_SET_CMPS_MODE:
 		ret = ox03c10_select_cmps_mode(ox03c10, *(u32 *)arg);
+		if (ret)
+			dev_dbg(&ox03c10->client->dev,
+				"SET_CMPS_MODE failed ret=%ld req_cmps=%u cur: %ux%u code=0x%x hdr=%u hdr_op=%u exp=%u bpp=%u\n",
+				ret, *(u32 *)arg,
+				ox03c10->cur_mode ? ox03c10->cur_mode->width : 0,
+				ox03c10->cur_mode ? ox03c10->cur_mode->height : 0,
+				ox03c10->cur_mode ? ox03c10->cur_mode->bus_fmt : 0,
+				ox03c10->cur_mode ? ox03c10->cur_mode->hdr_mode : 0,
+				ox03c10->cur_mode ? ox03c10->cur_mode->hdr_operating_mode : 0,
+				ox03c10->cur_mode ? ox03c10->cur_mode->exp_mode : 0,
+				ox03c10->cur_mode ? ox03c10->cur_mode->bpp : 0);
 		break;
 	case RKMODULE_SET_EXPAND_SINGLE_MODE:
 		ret = ox03c10_select_expand_single_mode(ox03c10, *(u32 *)arg);
@@ -5066,6 +5405,102 @@ static long ox03c10_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 	case RKMODULE_GET_HDR_COMPR_SINGLE_FRAME_INFO:
 		single_frame_info = (struct rkmodule_hdr_compr_single_frame_info *)arg;
 		single_frame_info->single_bitwidth = 10;
+		break;
+	case RKMODULE_GET_HDR_COMPR_PARAM:
+		compr_param = (struct rkmodule_hdr_compr *)arg;
+		if (ox03c10->cur_mode->hdr_mode == HDR_CIS_MERGE)
+			*compr_param = *ox03c10->cur_mode->hdr_compr;
+		break;
+	case RKMODULE_SET_REGISTER_GROUP:
+		reg_s = (struct rkmodule_reg_group *)arg;
+		if (reg_s->reg_group.num_regs == 0) {
+			dev_err(&ox03c10->client->dev, "sensor reg array num %llu\n", reg_s->reg_group.num_regs);
+			return -EINVAL;
+		}
+
+		if (reg_s->type == RKMODULE_REG_GROUP_MERGE) {
+			dev_dbg(&ox03c10->client->dev, "sensor reg array num %llu\n",
+				reg_s->reg_group.num_regs);
+			if (ox03c10->reg_merge.is_init) {
+				kfree(ox03c10->reg_merge.preg_addr);
+				ox03c10->reg_merge.preg_addr = NULL;
+				kfree(ox03c10->reg_merge.preg_value);
+				ox03c10->reg_merge.preg_value = NULL;
+				kfree(ox03c10->reg_merge.preg_addr_bytes);
+				ox03c10->reg_merge.preg_addr_bytes = NULL;
+				kfree(ox03c10->reg_merge.preg_value_bytes);
+				ox03c10->reg_merge.preg_value_bytes = NULL;
+				ox03c10->reg_merge.is_init = false;
+			}
+			lens = sizeof(u32) * reg_s->reg_group.num_regs;
+			preg_addr = kzalloc(lens, GFP_KERNEL);
+			if (!preg_addr)
+				return -EFAULT;
+			ox03c10->reg_merge.preg_addr = preg_addr;
+			user_ptr = (uintptr_t)reg_s->reg_group.preg_addr;
+			up = (void __user *)user_ptr;
+			ret = copy_from_user(preg_addr, up, lens);
+			if (ret) {
+				ret = -EFAULT;
+				goto end_set_reg;
+			}
+			preg_value = kzalloc(lens, GFP_KERNEL);
+			if (!preg_value) {
+				ret = -EFAULT;
+				goto end_set_reg;
+			} else {
+				ox03c10->reg_merge.preg_value = preg_value;
+			}
+			user_ptr = (uintptr_t)reg_s->reg_group.preg_value;
+			up = (void __user *)user_ptr;
+			ret = copy_from_user(preg_value, up, lens);
+			if (ret) {
+				ret = -EFAULT;
+				goto end_set_reg;
+			}
+			preg_addr_bytes = kzalloc(lens, GFP_KERNEL);
+			if (!preg_addr_bytes) {
+				ret = -EFAULT;
+				goto end_set_reg;
+			} else {
+				ox03c10->reg_merge.preg_addr_bytes = preg_addr_bytes;
+			}
+			user_ptr = (uintptr_t)reg_s->reg_group.preg_addr_bytes;
+			up = (void __user *)user_ptr;
+			ret = copy_from_user(preg_addr_bytes, up, lens);
+			if (ret) {
+				ret = -EFAULT;
+				goto end_set_reg;
+			}
+			preg_value_bytes = kzalloc(lens, GFP_KERNEL);
+			if (!preg_value_bytes) {
+				ret = -EFAULT;
+				goto end_set_reg;
+			} else {
+				ox03c10->reg_merge.preg_value_bytes = preg_value_bytes;
+			}
+			user_ptr = (uintptr_t)reg_s->reg_group.preg_value_bytes;
+			up = (void __user *)user_ptr;
+			ret = copy_from_user(preg_value_bytes, up, lens);
+			if (ret) {
+				ret = -EFAULT;
+				goto end_set_reg;
+			}
+			ox03c10->reg_merge.is_init = true;
+			ox03c10->reg_merge.num_regs = reg_s->reg_group.num_regs;
+			if (ox03c10->streaming)
+				ox03c10_write_reg_merge_group(ox03c10);
+		}
+		break;
+end_set_reg:
+		kfree(preg_addr);
+		kfree(preg_value);
+		kfree(preg_addr_bytes);
+		kfree(preg_value_bytes);
+		break;
+	case RKMODULE_GET_MERGE_WGT_CURVE:
+		merge_curve = (struct rkmodule_mge_oewgt *)arg;
+		ret = ox03c10_get_merge_curve(ox03c10, merge_curve);
 		break;
 	default:
 		ret = -ENOIOCTLCMD;
@@ -5099,6 +5534,9 @@ static long ox03c10_compat_ioctl32(struct v4l2_subdev *sd,
 	struct rkmodule_lenc_gain *lenc_gain;
 	struct rkmodule_reg_setting *reg_setting;
 	struct rkmodule_hdr_compr_single_frame_info *single_frame_info;
+	struct rkmodule_hdr_compr *compr_param;
+	struct rkmodule_reg_group *reg_s;
+	struct rkmodule_mge_oewgt *merge_curve;
 
 	switch (cmd) {
 	case RKMODULE_GET_MODULE_INFO:
@@ -5372,6 +5810,54 @@ static long ox03c10_compat_ioctl32(struct v4l2_subdev *sd,
 		}
 		kfree(single_frame_info);
 		break;
+	case RKMODULE_GET_HDR_COMPR_PARAM:
+		compr_param = kzalloc(sizeof(*compr_param), GFP_KERNEL);
+		if (!compr_param) {
+			ret = -ENOMEM;
+			return ret;
+		}
+
+		ret = ox03c10_ioctl(sd, cmd, compr_param);
+		if (!ret) {
+			if (copy_to_user(up, compr_param, sizeof(*compr_param))) {
+				kfree(compr_param);
+				return -EFAULT;
+			}
+		}
+		kfree(compr_param);
+		break;
+	case RKMODULE_SET_REGISTER_GROUP:
+		reg_s = kzalloc(sizeof(*reg_s), GFP_KERNEL);
+		if (!reg_s) {
+			ret = -ENOMEM;
+			return ret;
+		}
+
+		ret = copy_from_user(reg_s, up, sizeof(*reg_s));
+		if (!ret) {
+			ret = ox03c10_ioctl(sd, cmd, reg_s);
+			kfree(reg_s);
+		} else {
+			kfree(reg_s);
+			ret = -EFAULT;
+		}
+		break;
+	case RKMODULE_GET_MERGE_WGT_CURVE:
+		merge_curve = kzalloc(sizeof(*merge_curve), GFP_KERNEL);
+		if (!merge_curve) {
+			ret = -ENOMEM;
+			return ret;
+		}
+
+		ret = ox03c10_ioctl(sd, cmd, merge_curve);
+		if (!ret) {
+			if (copy_to_user(up, merge_curve, sizeof(*merge_curve))) {
+				kfree(merge_curve);
+				return -EFAULT;
+			}
+		}
+		kfree(merge_curve);
+		break;
 	default:
 		ret = -ENOIOCTLCMD;
 		break;
@@ -5491,6 +5977,8 @@ static int __ox03c10_start_stream(struct ox03c10 *ox03c10)
 	if (ret)
 		return -EINVAL;
 #endif
+	if (ox03c10->reg_merge.is_init)
+		ox03c10_write_reg_merge_group(ox03c10);
 	return ox03c10_write_reg(ox03c10->client, OX03C10_REG_CTRL_MODE,
 				OX03C10_REG_VALUE_08BIT, OX03C10_MODE_STREAMING);
 }
@@ -5501,6 +5989,7 @@ static int __ox03c10_stop_stream(struct ox03c10 *ox03c10)
 	ox03c10->has_init_wbgain = false;
 	ox03c10->has_init_blc = false;
 	ox03c10->has_init_lenc_gain = false;
+	ox03c10->reg_merge.is_init = false;
 	return ox03c10_write_reg(ox03c10->client, OX03C10_REG_CTRL_MODE,
 				OX03C10_REG_VALUE_08BIT, OX03C10_MODE_SW_STANDBY);
 }
@@ -5884,9 +6373,9 @@ static int ox03c10_set_ctrl(struct v4l2_ctrl *ctrl)
 				       OX03C10_REG_VALUE_08BIT,
 				       &val);
 		if (ctrl->val)
-			val |= MIRROR_BIT_MASK;
-		else
 			val &= ~MIRROR_BIT_MASK;
+		else
+			val |= MIRROR_BIT_MASK;
 		ret |= ox03c10_write_reg(ox03c10->client, OX03C10_VFLIP_REG,
 					 OX03C10_REG_VALUE_08BIT,
 					 val);
@@ -5993,6 +6482,7 @@ static int ox03c10_initialize_controls(struct ox03c10 *ox03c10)
 	ox03c10->has_init_wbgain = false;
 	ox03c10->has_init_blc = false;
 	ox03c10->has_init_lenc_gain = false;
+	ox03c10->reg_merge.is_init = false;
 
 	return 0;
 

@@ -88,6 +88,8 @@ struct iommu_domain;
  */
 #define DRM_COLOR_DCI_P3	0x10
 
+#define HDRVIVID_VSVDB_LEN		28
+
 enum rockchip_drm_debug_category {
 	VOP_DEBUG_PLANE		= BIT(0),
 	VOP_DEBUG_OVERLAY	= BIT(1),
@@ -155,6 +157,77 @@ enum rockchip_drm_vrr_type {
 	ROCKCHIP_VRR_VFP_MODE = 0,
 	ROCKCHIP_VRR_HFP_MODE = 1,
 	ROCKCHIP_VRR_DCLK_MODE = 2,
+};
+
+#define ROCKCHIP_MULTI_REFRESH_RATE_TABLE_COUNT 30
+#define ROCKCHIP_MODE_INFO_V1			0x1
+
+struct rockchip_drm_mode_info {
+	/**
+	 * @umode: display mode info
+	 */
+	struct drm_mode_modeinfo umode;
+	/**
+	 * @mrr_support: support multi refresh rate or hdmi qms-vrr
+	 */
+	u32 mrr_support;
+	/**
+	 * @mrr_table: the mulit refresh rate table or hdmi qms-vrr
+	 * refresh rate table, unit: 0.001Hz
+	 */
+	u32 mrr_table[ROCKCHIP_MULTI_REFRESH_RATE_TABLE_COUNT];
+	/**
+	 * @mrr_count: the count of refresh rate int table
+	 */
+	u32 mrr_count;
+	/**
+	 * @vrr_support: support variable refresh rate discrible as a range
+	 */
+	u32 vrr_support;
+	/**
+	 * @vrr_min_fps: the min refresh rate for variable refresh
+	 * rate or hdmi gaming vrr, unit: 0.001Hz
+	 */
+	u32 vrr_min_fps;
+	/**
+	 * @vrr_max_fps: the max refresh rate for variable refresh
+	 * rate or hdmi gaming vrr, unit: 0.001Hz
+	 */
+	u32 vrr_max_fps;
+	/**
+	 * @arr_fps_step: the refresh rate adjusting step for variable
+	 * refresh rate or hdmi gaming vrr, unit: 0.001Hz
+	 */
+	u32 vrr_fps_step;
+
+	/**
+	 * @fva_support: the hdmi fav function support
+	 */
+	u32 fva_support;
+
+	/**
+	 *@reserved: reserved for future version
+	 */
+	u32 reserved[10];
+};
+
+struct rockchip_drm_modes_info {
+	/**
+	 * @version: the modes info structure version
+	 */
+	u32 version;
+	/**
+	 * @mode_count: the count of mode
+	 */
+	u32 mode_count;
+	/**
+	 *@reserved: reserved for future version
+	 */
+	u32 reserved[10];
+	/**
+	 * @mode_info: a array of mode info
+	 */
+	struct rockchip_drm_mode_info mode_info[];
 };
 
 struct rockchip_drm_sub_dev {
@@ -277,11 +350,62 @@ struct dci_data {
 	u32 dci_en;
 };
 
-#define SHARP_REG_LENGTH 692
+#define ROCKCHIP_VOP_MSMART_MAX_GRIDS_NUM	100
+#define ROCKCHIP_VOP_MSMART_LUT_LENGTH		1536
+
+/* msmart layer grid info */
+struct rockchip_vop_msmart_grid {
+	u32 fb_id; /* fb object contains grid format type */
+
+	/* dest location which should not exceed the main layer */
+	u32 dst_x;
+	u32 dst_y;
+	u32 dst_w;
+	u32 dst_h;
+
+	/* Source values are 16.16 fixed point */
+	u32 src_x;
+	u32 src_y;
+	u32 src_h;
+	u32 src_w;
+
+	u32 reserved[20];
+};
+
+struct msmart_data {
+	u32 version;
+
+	/* Source values are 16.16 fixed point */
+	u32 src_w;
+	u32 src_h;
+
+	u32 crtc_x;
+	u32 crtc_y;
+	u32 crtc_w;
+	u32 crtc_h;
+
+	u32 active_grid_num;
+	u32 reserved[30];
+	struct rockchip_vop_msmart_grid grid[ROCKCHIP_VOP_MSMART_MAX_GRIDS_NUM];
+};
+
+#define SHARP_REG_LENGTH_V1 173
+#define SHARP_REG_LENGTH_V2 14
+
+struct sharp_regs_v1 {
+	u32 regs[SHARP_REG_LENGTH_V1];
+};
+
+struct sharp_regs_v2 {
+	u32 regs[SHARP_REG_LENGTH_V2];
+};
 
 struct post_sharp {
 	u32 plat; /* Reserved to distinguish later platform */
-	u32 regs[SHARP_REG_LENGTH / 4];
+	union {
+		struct sharp_regs_v1 regs_v1;
+		struct sharp_regs_v2 regs_v2;
+	};
 };
 
 struct rockchip_hdmi_vrr_state {
@@ -326,6 +450,8 @@ struct rockchip_crtc_state {
 	 */
 	bool sharp_en;
 
+	bool acm_en;
+
 	bool dimming_changed;
 
 	struct drm_tv_connector_state *tv_state;
@@ -348,9 +474,11 @@ struct rockchip_crtc_state {
 	u32 output_if_left_panel;
 	u32 bus_format;
 	u32 bus_flags;
+	u32 hdr_type;
 	int post_r2y_en;
 	int post_y2r_en;
 	int post_csc_mode;
+	int post_csc_y2r_mode;
 	int bcsh_en;
 	enum drm_color_encoding color_encoding;
 	enum drm_color_range color_range;
@@ -376,6 +504,7 @@ struct rockchip_crtc_state {
 	struct drm_property_blob *acm_lut_data;
 	struct drm_property_blob *post_csc_data;
 	struct drm_property_blob *post_sharp_data;
+	struct drm_property_blob *cgc_s2h_data;
 	struct drm_property_blob *cubic_lut_data;
 	struct drm_property_blob *dimming_data;
 
@@ -604,6 +733,7 @@ struct rockchip_crtc_funcs {
 	void (*crtc_output_post_enable)(struct drm_crtc *crtc, int intf);
 	void (*crtc_output_pre_disable)(struct drm_crtc *crtc, int intf);
 	int (*crtc_set_color_bar)(struct drm_crtc *crtc, enum rockchip_color_bar_mode mode);
+	unsigned long (*crtc_get_aclk_rate)(struct drm_crtc *crtc);
 	unsigned long (*crtc_get_dclk_rate)(struct drm_crtc *crtc);
 	int (*set_aclk)(struct drm_crtc *crtc, enum rockchip_drm_vop_aclk_mode aclk_mode, struct dmcfreq_vop_info *vop_bw_info);
 	int (*get_crc)(struct drm_crtc *crtc);
@@ -650,6 +780,7 @@ struct rockchip_drm_private {
 	/* private connector prop */
 	struct drm_property *connector_id_prop;
 	struct drm_property *split_area_prop;
+	struct drm_property *mode_info_prop;
 
 	/* private local dimming prop */
 	struct drm_property *dimming_data_prop;
@@ -715,6 +846,22 @@ struct rockchip_drm_hdmi21_data {
 	struct rockchip_drm_vrr_cap vrr_cap;
 };
 
+enum rockchip_drm_mode_color_caps_mask {
+	RGB_8BIT = 0,
+	RGB_10BIT,
+	YUV444_8BIT,
+	YUV444_10BIT,
+	YUV422_8BIT,
+	YUV422_10BIT,
+	YUV420_8BIT,
+	YUV420_10BIT,
+};
+
+struct rockchip_drm_mode_color_caps {
+	struct drm_mode_modeinfo umode;
+	u64 color_caps;
+};
+
 void rockchip_connector_update_vfp_for_vrr(struct drm_crtc *crtc, struct drm_display_mode *mode,
 					   int vfp);
 int rockchip_drm_dma_attach_device(struct drm_device *drm_dev,
@@ -764,13 +911,15 @@ uint32_t rockchip_drm_of_find_possible_crtcs(struct drm_device *dev,
 					     struct device_node *port);
 uint32_t rockchip_drm_get_bpp(const struct drm_format_info *info);
 uint32_t rockchip_drm_get_cycles_per_pixel(uint32_t bus_format);
-int rockchip_drm_get_yuv422_format(struct drm_connector *connector,
-				   const struct edid *edid);
+int rockchip_drm_get_yuv422_format(struct drm_connector *connector, const struct edid *edid,
+				   int ext_block_num);
 int rockchip_drm_parse_cea_ext(struct rockchip_drm_hdmi21_data *hdmi21_data,
-			       const struct edid *edid);
-int rockchip_drm_parse_dovi(u8 *sink_data, const struct edid *edid);
-int rockchip_drm_parse_colorimetry_data_block(u32 *colorimetry, const struct edid *edid);
-u8 rockchip_drm_parse_hdr10_plus_vsdb(const struct edid *edid);
+			       const struct edid *edid, int ext_block_num);
+int rockchip_drm_parse_dovi(u8 *sink_data, const struct edid *edid, int ext_block_num);
+int rockchip_drm_parse_colorimetry_data_block(u32 *colorimetry, const struct edid *edid,
+					      int ext_block_num);
+u8 rockchip_drm_parse_hdr10_plus_vsdb(const struct edid *edid, int ext_block_num);
+int rockchip_drm_parse_hdrvivid(void *sink_data, const struct edid *edid, int ext_block_num);
 struct dma_buf *rockchip_drm_gem_prime_export(struct drm_gem_object *obj, int flags);
 long rockchip_drm_dclk_round_rate(u32 version, struct clk *dclk, unsigned long rate);
 int rockchip_drm_dclk_set_rate(u32 version, struct clk *dclk, unsigned long rate);
@@ -794,9 +943,23 @@ u16 rockchip_hdmi_vrr_tfr_match_to_vrefresh(u8 tfr);
 const struct
 mvrr_const_val *rockchip_hdmi_vrr_get_vrrconf_mconst(enum hdmi_brr_vic brr_vic, u16 vrefresh_khz);
 u16 rockchip_hdmi_vrr_calc_new_vtotal(const struct mvrr_const_val *mvrr, u32 frame_cnt);
+int rockchip_drm_bus_fmt_color_depth(unsigned int bus_format);
+int rockchip_drm_bus_fmt_to_color_format(unsigned int bus_format);
+void rockchip_drm_parse_bus_format(u32 bus_format, u32 *format, u32 *colordepth);
+bool rockchip_drm_bus_fmt_is_rgb(unsigned int bus_format);
+bool rockchip_drm_bus_fmt_is_yuv444(unsigned int bus_format);
+bool rockchip_drm_bus_fmt_is_yuv422(unsigned int bus_format);
+bool rockchip_drm_bus_fmt_is_yuv420(unsigned int bus_format);
+unsigned int
+rockchip_drm_hdmi_get_tmdsclock(unsigned long output_bus_format, unsigned long pixelclock);
+int rockchip_drm_atomic_replace_property_blob_from_id(struct drm_device *dev,
+						      struct drm_property_blob **blob,
+						      uint64_t blob_id, ssize_t expected_size,
+						      ssize_t expected_elem_size, bool *replaced);
 
 extern struct platform_driver cdn_dp_driver;
 extern struct platform_driver dw_hdmi_rockchip_pltfm_driver;
+extern struct platform_driver dw_hdmi_qp_rockchip_pltfm_driver;
 extern struct platform_driver dw_mipi_dsi_rockchip_driver;
 extern struct platform_driver dw_mipi_dsi2_rockchip_driver;
 extern struct platform_driver inno_hdmi_driver;

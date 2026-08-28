@@ -484,6 +484,22 @@ config VIDEO_GC8034
 	  To compile this driver as a module, choose M here: the
 	  module will be called gc8034.
 
+config VIDEO_GC8602
+	tristate "GalaxyCore GC8602 sensor support"
+	depends on I2C && VIDEO_DEV
+	depends on PM
+	depends on MEDIA_CAMERA_SUPPORT
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	help
+	  Support for the GalaxyCore GC8602 CMOS image sensor with MIPI CSI-2
+	  interface. The driver supports 3840x2160 10-bit Bayer output in
+	  linear and HDR modes through the V4L2 sub-device API.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called gc8602.
+
 config VIDEO_GC8613
 	tristate "GalaxyCore GC8613 sensor support"
 	depends on I2C && VIDEO_DEV
@@ -752,6 +768,20 @@ config VIDEO_IMX347
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called imx347.
+
+config VIDEO_IMX351
+	tristate "Sony imx351 sensor support"
+	depends on I2C && VIDEO_DEV
+	depends on MEDIA_CAMERA_SUPPORT
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	help
+	  This is a Video4Linux2 sensor driver for the Sony
+	  IMX351 camera.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called imx351.
 
 config VIDEO_IMX355
 	tristate "Sony IMX355 sensor support"
@@ -1234,6 +1264,24 @@ config VIDEO_OS08A20
 	  This is a Video4Linux2 sensor driver for the OmniVision
 	  OS08A20 camera.
 
+config VIDEO_OS08G10
+	tristate "OmniVision OS08G10 sensor support"
+	depends on I2C && VIDEO_DEV
+	depends on MEDIA_CAMERA_SUPPORT
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	help
+	  This is a Video4Linux2 sensor driver for the OmniVision
+	  OS08G10 camera.
+
+	  This driver uses the V4L2 sub-device API (VIDEO_V4L2_SUBDEV_API)
+	  and media controller (MEDIA_CONTROLLER); both are selected
+	  automatically when this option is enabled.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called os08g10.
+
 config VIDEO_OS12D40
 	tristate "OmniVision OS12D40 sensor support"
 	depends on I2C && VIDEO_DEV
@@ -1463,6 +1511,21 @@ config VIDEO_OV2740
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called ov2740.
+
+config VIDEO_OV32B40
+	tristate "OmniVision OV32B40 sensor support"
+	depends on I2C && VIDEO_DEV
+	depends on MEDIA_CAMERA_SUPPORT
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	select VIDEO_OTP_EEPROM
+	help
+	  This is a Video4Linux2 sensor driver for the Omnivision
+	  OV32B40 camera sensor with a MIPI CSI-2 interface.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ov32b40.
 
 config VIDEO_OV4686
 	tristate "OmniVision OV4686 sensor support"
@@ -2247,6 +2310,16 @@ config VIDEO_SC501AI
 	help
 	  This is a Video4Linux2 sensor driver for the SmartSens
 	  SC501AI camera.
+
+config VIDEO_SC501CS
+	tristate "SmartSens SC501CS sensor support"
+	depends on I2C && VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	help
+	  This is a Video4Linux2 sensor driver for the SmartSens
+	  SC501CS camera.
 
 config VIDEO_SC530AI
 	tristate "SmartSens SC530AI sensor support"
