@@ -90,7 +90,7 @@ adds r7, r1, r2; sbcscc r7, r7, r3; movcc r3, #0
 	.thumb
 	.syntax unified
 	cbnz	r3, .L8
-	bl	arm_copy_from_user
+	bl	ftl_copy_from_user
 	mov	r5, r0
 	cbz	r0, .L5
 .L6:
@@ -14501,7 +14501,7 @@ adds r1, r4, r2; sbcscc r1, r1, r3; movcc r3, #0
 	bne	.L2053
 	mov	r0, r4
 	mov	r1, r5
-	bl	arm_copy_to_user
+	bl	ftl_copy_to_user
 	mov	r4, r0
 	cmp	r0, #0
 	beq	.L2041
