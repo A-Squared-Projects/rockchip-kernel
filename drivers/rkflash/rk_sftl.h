@@ -28,6 +28,15 @@ int rk_sftl_vendor_read(u32 id, u8 *buf, u32 size);
 int rk_sftl_vendor_write(u32 id, u8 *buf, u32 size);
 int rk_sftl_vendor_register(void);
 int rk_sftl_vendor_storage_init(void);
+/* The SFTL blob reaches user memory through these rather than calling
+ * arm_copy_{from,to}_user directly. A call straight from the .S links to the
+ * raw primitive, which does not open the uaccess domain window, so the copy
+ * takes a page domain fault under CONFIG_CPU_SW_DOMAIN_PAN. Going through C
+ * gets the bracket the running kernel expects. */
+unsigned long ftl_copy_from_user(void *to, const void __user *from,
+				 unsigned long n);
+unsigned long ftl_copy_to_user(void __user *to, const void *from,
+			       unsigned long n);
 int rk_sftl_vendor_dev_ops_register(int (*read)(u32 sec,
 						u32 n_sec,
 						void *p_data),
