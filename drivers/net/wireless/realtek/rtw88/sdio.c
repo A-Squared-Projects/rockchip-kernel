@@ -1203,10 +1203,18 @@ static void rtw_sdio_process_tx_queue(struct rtw_dev *rtwdev,
 		return;
 	}
 
-	if (queue <= RTW_TX_QUEUE_VO)
-		rtw_sdio_indicate_tx_status(rtwdev, skb);
-	else
+	/*
+	 * Beacons and H2C commands are the driver's own and have no mac80211
+	 * transmit status to report. Everything else came from mac80211 and
+	 * must be reported back, management frames included: dropping them
+	 * silently leaves mac80211 waiting for a status that never arrives,
+	 * and a caller whose retry logic hangs off that status - DPP is one -
+	 * waits forever. The PCI and USB paths already report every frame.
+	 */
+	if (queue == RTW_TX_QUEUE_BCN || queue == RTW_TX_QUEUE_H2C)
 		dev_kfree_skb_any(skb);
+	else
+		rtw_sdio_indicate_tx_status(rtwdev, skb);
 }
 
 static void rtw_sdio_tx_handler(struct work_struct *work)
