@@ -963,6 +963,17 @@ static int h5_btrtl_setup(struct h5 *h5)
 	/* Give the device some time to set up the new baudrate. */
 	usleep_range(10000, 20000);
 
+	/* DIAGNOSTIC, NOT FOR PRODUCTION: the config blob asks for hardware
+	 * flow control and Realtek's own userspace hciattach never enables it
+	 * for an 8723DS on H5 - uart_flow_ctrl is set in exactly one place
+	 * there, for an 8761B test chip on H4, and the blob's flow-control bit
+	 * is never even parsed. A legacy unit running that userspace attach is
+	 * 60/60 clean where this path fails about one boot in twenty, always
+	 * as a link that goes silent rather than a link that errors. Follow the
+	 * vendor and leave it off.
+	 */
+	flow_control = false;
+
 	serdev_device_set_baudrate(h5->hu->serdev, controller_baudrate);
 	serdev_device_set_flow_control(h5->hu->serdev, flow_control);
 
