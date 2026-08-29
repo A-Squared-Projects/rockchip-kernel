@@ -507,6 +507,7 @@ static int rtl_download_firmware(struct hci_dev *hdev,
 	int frag_len = RTL_FRAG_LEN;
 	int ret = 0;
 	int i;
+	int retry;
 	struct sk_buff *skb;
 	struct hci_rp_read_local_version *rp;
 
@@ -530,14 +531,37 @@ static int rtl_download_firmware(struct hci_dev *hdev,
 		}
 		memcpy(dl_cmd->data, data, frag_len);
 
-		/* Send download command */
-		skb = __hci_cmd_sync(hdev, 0xfc20, frag_len + 1, dl_cmd,
-				     HCI_INIT_TIMEOUT);
-		if (IS_ERR(skb)) {
-			rtl_dev_err(hdev, "download fw command failed (%ld)",
-				    PTR_ERR(skb));
-			ret = PTR_ERR(skb);
-			goto out;
+		/* Send download command.
+		 *
+		 * Retry it: on an H5 UART link a single corrupted fragment
+		 * otherwise aborts the whole download and leaves the
+		 * controller registered but unusable, with no way back short
+		 * of re-probing the driver. Measured on RTL8723DS at 1500000
+		 * baud, roughly one boot in twenty loses exactly one packet -
+		 * with no UART framing, parity or overrun error, so the bytes
+		 * arrive clean and the H5 decoder simply loses the stream.
+		 *
+		 * Realtek's own userspace hciattach has always done this,
+		 * resending a fragment up to three times on timeout, which is
+		 * why the vendor stack never showed the failure. Resending is
+		 * safe for the same reason: the controller acknowledges by
+		 * index, so a duplicate is either unseen or re-acknowledged.
+		 */
+		for (retry = 0; ; retry++) {
+			skb = __hci_cmd_sync(hdev, 0xfc20, frag_len + 1, dl_cmd,
+					     HCI_INIT_TIMEOUT);
+			if (!IS_ERR(skb))
+				break;
+
+			if (retry >= 3) {
+				rtl_dev_err(hdev, "download fw command failed (%ld)",
+					    PTR_ERR(skb));
+				ret = PTR_ERR(skb);
+				goto out;
+			}
+
+			rtl_dev_warn(hdev, "download fw fragment %d failed (%ld), retrying",
+				     i, PTR_ERR(skb));
 		}
 
 		if (skb->len != sizeof(struct rtl_download_response)) {
