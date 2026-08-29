@@ -916,6 +916,16 @@ static int h5_btrtl_setup(struct h5 *h5)
 	if (err)
 		goto out_free;
 
+	/* DIAGNOSTIC, NOT FOR PRODUCTION: the config blob asks for 1500000,
+	 * and a single H5 packet is corrupted during the bulk firmware
+	 * download on roughly one boot in twenty - with zero UART framing,
+	 * parity or overrun errors, so the bytes are electrically clean and
+	 * the decoder simply loses the stream. Drop to 921600 to test whether
+	 * the rate itself is the variable.
+	 */
+	device_baudrate = 0x05f75004;
+	controller_baudrate = 921600;
+
 	baudrate_data = cpu_to_le32(device_baudrate);
 	skb = __hci_cmd_sync(h5->hu->hdev, 0xfc17, sizeof(baudrate_data),
 			     &baudrate_data, HCI_INIT_TIMEOUT);
