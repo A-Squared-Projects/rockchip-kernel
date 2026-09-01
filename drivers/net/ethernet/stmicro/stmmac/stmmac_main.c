@@ -302,7 +302,7 @@ static void stmmac_clk_csr_set(struct stmmac_priv *priv)
 {
 	u32 clk_rate;
 
-	clk_rate = clk_get_rate(priv->plat->stmmac_clk);
+	clk_rate = clk_get_rate(priv->plat->pclk);
 
 	/* Platform provided default clk_csr would be assumed valid
 	 * for all other cases except for the below mentioned ones.
@@ -934,8 +934,8 @@ static void stmmac_mac_flow_ctrl(struct stmmac_priv *priv, u32 duplex)
 {
 	u32 tx_cnt = priv->plat->tx_queues_to_use;
 
-	stmmac_flow_ctrl(priv, priv->hw, duplex, priv->flow_ctrl,
-			priv->pause, tx_cnt);
+	stmmac_flow_ctrl(priv, priv->hw, duplex, priv->flow_ctrl & priv->plat->flow_ctrl,
+			 priv->pause, tx_cnt);
 }
 
 static struct phylink_pcs *stmmac_mac_select_pcs(struct phylink_config *config,
@@ -1148,6 +1148,9 @@ static int stmmac_init_phy(struct net_device *dev)
 
 	if (!phylink_expects_phy(priv->phylink))
 		return 0;
+
+	if (priv->plat->integrated_phy_power)
+		ret = priv->plat->integrated_phy_power(priv->plat->bsp_priv, true);
 
 	fwnode = of_fwnode_handle(priv->plat->phylink_node);
 	if (!fwnode)
@@ -2503,7 +2506,7 @@ static bool stmmac_xdp_xmit_zc(struct stmmac_priv *priv, u32 queue, u32 budget)
 
 		stmmac_enable_dma_transmission(priv, priv->ioaddr);
 
-		tx_q->cur_tx = STMMAC_NEXT_ENTRY(tx_q->cur_tx, priv->dma_conf.dma_tx_size);
+		tx_q->cur_tx = STMMAC_GET_ENTRY(tx_q->cur_tx, priv->dma_conf.dma_tx_size);
 		entry = tx_q->cur_tx;
 	}
 	flags = u64_stats_update_begin_irqsave(&txq_stats->syncp);
@@ -2660,7 +2663,7 @@ static int stmmac_tx_clean(struct stmmac_priv *priv, int budget, u32 queue)
 
 		stmmac_release_tx_desc(priv, p, priv->mode);
 
-		entry = STMMAC_NEXT_ENTRY(entry, priv->dma_conf.dma_tx_size);
+		entry = STMMAC_GET_ENTRY(entry, priv->dma_conf.dma_tx_size);
 	}
 	tx_q->dirty_tx = entry;
 
@@ -2909,6 +2912,11 @@ static void stmmac_check_ether_addr(struct stmmac_priv *priv)
 
 	if (!is_valid_ether_addr(priv->dev->dev_addr)) {
 		stmmac_get_umac_addr(priv, priv->hw, addr, 0);
+		if (is_valid_ether_addr(addr))
+			eth_hw_addr_set(priv->dev, addr);
+		else if (likely(priv->plat->get_eth_addr))
+			priv->plat->get_eth_addr(priv->plat->bsp_priv,
+						 addr);
 		if (is_valid_ether_addr(addr))
 			eth_hw_addr_set(priv->dev, addr);
 		else
@@ -3732,9 +3740,12 @@ stmmac_setup_dma_desc(struct stmmac_priv *priv, unsigned int mtu)
 	dma_conf->dma_rx_size = priv->dma_conf.dma_rx_size;
 
 	if (!dma_conf->dma_tx_size)
-		dma_conf->dma_tx_size = DMA_DEFAULT_TX_SIZE;
+		dma_conf->dma_tx_size = dma_conf->dma_tx_size ? priv->plat->dma_tx_size :
+					DMA_DEFAULT_TX_SIZE;
+
 	if (!dma_conf->dma_rx_size)
-		dma_conf->dma_rx_size = DMA_DEFAULT_RX_SIZE;
+		dma_conf->dma_rx_size = dma_conf->dma_rx_size ? priv->plat->dma_rx_size :
+					DMA_DEFAULT_RX_SIZE;
 
 	/* Earlier check for TBS */
 	for (chan = 0; chan < priv->plat->tx_queues_to_use; chan++) {
@@ -3909,6 +3920,9 @@ static int stmmac_release(struct net_device *dev)
 	phylink_stop(priv->phylink);
 	phylink_disconnect_phy(priv->phylink);
 
+	if (priv->plat->integrated_phy_power)
+		priv->plat->integrated_phy_power(priv->plat->bsp_priv, false);
+
 	stmmac_disable_all_queues(priv);
 
 	for (chan = 0; chan < priv->plat->tx_queues_to_use; chan++)
@@ -3976,7 +3990,7 @@ static bool stmmac_vlan_insert(struct stmmac_priv *priv, struct sk_buff *skb,
 		return false;
 
 	stmmac_set_tx_owner(priv, p);
-	tx_q->cur_tx = STMMAC_NEXT_ENTRY(tx_q->cur_tx, priv->dma_conf.dma_tx_size);
+	tx_q->cur_tx = STMMAC_GET_ENTRY(tx_q->cur_tx, priv->dma_conf.dma_tx_size);
 	return true;
 }
 
@@ -4004,7 +4018,7 @@ static void stmmac_tso_allocator(struct stmmac_priv *priv, dma_addr_t des,
 	while (tmp_len > 0) {
 		dma_addr_t curr_addr;
 
-		tx_q->cur_tx = STMMAC_NEXT_ENTRY(tx_q->cur_tx,
+		tx_q->cur_tx = STMMAC_GET_ENTRY(tx_q->cur_tx,
 						priv->dma_conf.dma_tx_size);
 		WARN_ON(tx_q->tx_skbuff[tx_q->cur_tx]);
 
@@ -4137,7 +4151,7 @@ static netdev_tx_t stmmac_tso_xmit(struct sk_buff *skb, struct net_device *dev)
 
 		stmmac_set_mss(priv, mss_desc, mss);
 		tx_q->mss = mss;
-		tx_q->cur_tx = STMMAC_NEXT_ENTRY(tx_q->cur_tx,
+		tx_q->cur_tx = STMMAC_GET_ENTRY(tx_q->cur_tx,
 						priv->dma_conf.dma_tx_size);
 		WARN_ON(tx_q->tx_skbuff[tx_q->cur_tx]);
 	}
@@ -4262,7 +4276,7 @@ static netdev_tx_t stmmac_tso_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * ndo_start_xmit will fill this descriptor the next time it's
 	 * called and stmmac_tx_clean may clean up to this descriptor.
 	 */
-	tx_q->cur_tx = STMMAC_NEXT_ENTRY(tx_q->cur_tx, priv->dma_conf.dma_tx_size);
+	tx_q->cur_tx = STMMAC_GET_ENTRY(tx_q->cur_tx, priv->dma_conf.dma_tx_size);
 
 	if (unlikely(stmmac_tx_avail(priv, queue) <= (MAX_SKB_FRAGS + 1))) {
 		netif_dbg(priv, hw, priv->dev, "%s: stop transmitted packets\n",
@@ -4420,7 +4434,7 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
 		int len = skb_frag_size(frag);
 		bool last_segment = (i == (nfrags - 1));
 
-		entry = STMMAC_NEXT_ENTRY(entry, priv->dma_conf.dma_tx_size);
+		entry = STMMAC_GET_ENTRY(entry, priv->dma_conf.dma_tx_size);
 		WARN_ON(tx_q->tx_skbuff[entry]);
 
 		if (likely(priv->extend_desc))
@@ -4490,7 +4504,7 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * ndo_start_xmit will fill this descriptor the next time it's
 	 * called and stmmac_tx_clean may clean up to this descriptor.
 	 */
-	entry = STMMAC_NEXT_ENTRY(entry, priv->dma_conf.dma_tx_size);
+	entry = STMMAC_GET_ENTRY(entry, priv->dma_conf.dma_tx_size);
 	tx_q->cur_tx = entry;
 
 	if (netif_msg_pktdata(priv)) {
@@ -4660,7 +4674,7 @@ static inline void stmmac_rx_refill(struct stmmac_priv *priv, u32 queue)
 		dma_wmb();
 		stmmac_set_rx_owner(priv, p, use_rx_wd);
 
-		entry = STMMAC_NEXT_ENTRY(entry, priv->dma_conf.dma_rx_size);
+		entry = STMMAC_GET_ENTRY(entry, priv->dma_conf.dma_rx_size);
 	}
 	rx_q->dirty_rx = entry;
 	rx_q->rx_tail_addr = rx_q->dma_rx_phy +
@@ -4787,7 +4801,7 @@ static int stmmac_xdp_xmit_xdpf(struct stmmac_priv *priv, int queue,
 
 	stmmac_enable_dma_transmission(priv, priv->ioaddr);
 
-	entry = STMMAC_NEXT_ENTRY(entry, priv->dma_conf.dma_tx_size);
+	entry = STMMAC_GET_ENTRY(entry, priv->dma_conf.dma_tx_size);
 	tx_q->cur_tx = entry;
 
 	return STMMAC_XDP_TX;
@@ -5018,7 +5032,7 @@ static bool stmmac_rx_refill_zc(struct stmmac_priv *priv, u32 queue, u32 budget)
 		dma_wmb();
 		stmmac_set_rx_owner(priv, rx_desc, use_rx_wd);
 
-		entry = STMMAC_NEXT_ENTRY(entry, priv->dma_conf.dma_rx_size);
+		entry = STMMAC_GET_ENTRY(entry, priv->dma_conf.dma_rx_size);
 	}
 
 	if (rx_desc) {
@@ -5078,7 +5092,7 @@ static int stmmac_rx_zc(struct stmmac_priv *priv, int limit, u32 queue)
 		}
 
 read_again:
-		if (count >= limit)
+		if ((count >= limit - 1) && limit > 1)
 			break;
 
 		buf1_len = 0;
@@ -5103,12 +5117,9 @@ read_again:
 			break;
 
 		/* Prefetch the next RX descriptor */
-		next_entry = STMMAC_NEXT_ENTRY(rx_q->cur_rx,
-					       priv->dma_conf.dma_rx_size);
-		if (unlikely(next_entry == rx_q->dirty_rx))
-			break;
-
-		rx_q->cur_rx = next_entry;
+		rx_q->cur_rx = STMMAC_GET_ENTRY(rx_q->cur_rx,
+						priv->dma_conf.dma_rx_size);
+		next_entry = rx_q->cur_rx;
 
 		if (priv->extend_desc)
 			np = (struct dma_desc *)(rx_q->dma_erx + next_entry);
@@ -5238,10 +5249,11 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
 	struct stmmac_xdp_buff ctx;
 	unsigned long flags;
 	int xdp_status = 0;
-	int bufsz;
+	int buf_sz;
 
 	dma_dir = page_pool_get_dma_dir(rx_q->page_pool);
-	bufsz = DIV_ROUND_UP(priv->dma_conf.dma_buf_sz, PAGE_SIZE) * PAGE_SIZE;
+	buf_sz = DIV_ROUND_UP(priv->dma_conf.dma_buf_sz, PAGE_SIZE) * PAGE_SIZE;
+	limit = min(priv->dma_conf.dma_rx_size - 1, (unsigned int)limit);
 
 	if (netif_msg_rx_status(priv)) {
 		void *rx_head;
@@ -5278,7 +5290,7 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
 		}
 
 read_again:
-		if (count >= limit)
+		if ((count >= limit - 1) && limit > 1)
 			break;
 
 		buf1_len = 0;
@@ -5297,12 +5309,9 @@ read_again:
 		if (unlikely(status & dma_own))
 			break;
 
-		next_entry = STMMAC_NEXT_ENTRY(rx_q->cur_rx,
-					       priv->dma_conf.dma_rx_size);
-		if (unlikely(next_entry == rx_q->dirty_rx))
-			break;
-
-		rx_q->cur_rx = next_entry;
+		rx_q->cur_rx = STMMAC_GET_ENTRY(rx_q->cur_rx,
+						priv->dma_conf.dma_rx_size);
+		next_entry = rx_q->cur_rx;
 
 		if (priv->extend_desc)
 			np = (struct dma_desc *)(rx_q->dma_erx + next_entry);
@@ -5358,7 +5367,7 @@ read_again:
 			dma_sync_single_for_cpu(priv->device, buf->addr,
 						buf1_len, dma_dir);
 
-			xdp_init_buff(&ctx.xdp, bufsz, &rx_q->xdp_rxq);
+			xdp_init_buff(&ctx.xdp, buf_sz, &rx_q->xdp_rxq);
 			xdp_prepare_buff(&ctx.xdp, page_address(buf->page),
 					 buf->page_offset, buf1_len, false);
 
@@ -7038,22 +7047,30 @@ static void stmmac_napi_add(struct net_device *dev)
 
 	for (queue = 0; queue < maxq; queue++) {
 		struct stmmac_channel *ch = &priv->channel[queue];
+		int rx_budget = ((priv->plat->dma_rx_size < NAPI_POLL_WEIGHT) &&
+				 (priv->plat->dma_rx_size > 0)) ?
+				 priv->plat->dma_rx_size : NAPI_POLL_WEIGHT;
+		int tx_budget = ((priv->plat->dma_tx_size < NAPI_POLL_WEIGHT) &&
+				 (priv->plat->dma_tx_size > 0)) ?
+				 priv->plat->dma_tx_size : NAPI_POLL_WEIGHT;
+		int budget = min(rx_budget, tx_budget);
 
 		ch->priv_data = priv;
 		ch->index = queue;
 		spin_lock_init(&ch->lock);
 
 		if (queue < priv->plat->rx_queues_to_use) {
-			netif_napi_add(dev, &ch->rx_napi, stmmac_napi_poll_rx);
+			netif_napi_add_weight(dev, &ch->rx_napi,
+					      stmmac_napi_poll_rx, rx_budget);
 		}
 		if (queue < priv->plat->tx_queues_to_use) {
-			netif_napi_add_tx(dev, &ch->tx_napi,
-					  stmmac_napi_poll_tx);
+			netif_napi_add_tx_weight(dev, &ch->tx_napi,
+						 stmmac_napi_poll_tx, tx_budget);
 		}
 		if (queue < priv->plat->rx_queues_to_use &&
 		    queue < priv->plat->tx_queues_to_use) {
-			netif_napi_add(dev, &ch->rxtx_napi,
-				       stmmac_napi_poll_rxtx);
+			netif_napi_add_weight(dev, &ch->rxtx_napi,
+					      stmmac_napi_poll_rxtx, budget);
 		}
 	}
 }
@@ -7576,8 +7593,14 @@ int stmmac_suspend(struct device *dev)
 		stmmac_pmt(priv, priv->hw, priv->wolopts);
 		priv->irq_wake = 1;
 	} else {
+		if (priv->plat->integrated_phy_power)
+			priv->plat->integrated_phy_power(priv->plat->bsp_priv,
+							 false);
 		stmmac_mac_set(priv, priv->ioaddr, false);
 		pinctrl_pm_select_sleep_state(priv->device);
+		/* Make the phy into suspend state */
+		if (priv->mii)
+			stmmac_mdio_idle(priv->mii);
 	}
 
 	mutex_unlock(&priv->lock);
@@ -7675,6 +7698,9 @@ int stmmac_resume(struct device *dev)
 		/* reset the phy so that it's ready */
 		if (priv->mii)
 			stmmac_mdio_reset(priv->mii);
+		if (priv->plat->integrated_phy_power)
+			priv->plat->integrated_phy_power(priv->plat->bsp_priv,
+							 true);
 	}
 
 	if (!priv->plat->serdes_up_after_phy_linkup && priv->plat->serdes_powerup) {

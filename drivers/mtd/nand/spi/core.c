@@ -12,6 +12,7 @@
 #include <linux/device.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/mtd/bbt_store.h>
 #include <linux/mtd/spinand.h>
@@ -569,7 +570,7 @@ static int spinand_lock_block(struct spinand_device *spinand, u8 lock)
 
 static int spinand_read_page_wait(struct spinand_device *spinand, u8 *s)
 {
-	unsigned long timeo =  jiffies + msecs_to_jiffies(400);
+	ktime_t deadline = ktime_add_ms(ktime_get(), SPINAND_WAITRDY_TIMEOUT_MS);
 	u8 status;
 	int ret;
 
@@ -588,12 +589,36 @@ static int spinand_read_page_wait(struct spinand_device *spinand, u8 *s)
 		if (!(status & STATUS_BUSY))
 			break;
 
-	} while (time_before(jiffies, timeo));
+	} while (ktime_before(ktime_get(), deadline));
 
-	*s = status;
+	if (s)
+		*s = status;
 
 	return status & STATUS_BUSY ? -ETIMEDOUT : 0;
 }
+
+#if !IS_ENABLED(CONFIG_HIGH_RES_TIMERS)
+static int spinand_wait_poll_status(struct spinand_device *spinand, u8 *s)
+{
+	u8 status;
+	int ret;
+	ktime_t poll_deadline = ktime_add_us(ktime_get(), 500);
+
+	do {
+		ret = spinand_read_status(spinand, &status);
+		if (ret)
+			return ret;
+
+		if (!(status & STATUS_BUSY))
+			break;
+	} while (ktime_before(ktime_get(), poll_deadline));
+
+	if (s)
+		*s = status;
+
+	return status & STATUS_BUSY ? -ETIMEDOUT : 0;
+}
+#endif
 
 static int spinand_read_page(struct spinand_device *spinand,
 			     const struct nand_page_io_req *req)
@@ -616,10 +641,19 @@ static int spinand_read_page(struct spinand_device *spinand,
 		if (ret)
 			return ret;
 	} else {
+#if !IS_ENABLED(CONFIG_HIGH_RES_TIMERS)
+		ret = spinand_wait_poll_status(spinand, &status);
+		if (ret == -ETIMEDOUT)
+			ret = spinand_wait(spinand,
+					   SPINAND_READ_INITIAL_DELAY_US,
+					   SPINAND_READ_POLL_DELAY_US,
+					   &status);
+#else
 		ret = spinand_wait(spinand,
 				   SPINAND_READ_INITIAL_DELAY_US,
 				   SPINAND_READ_POLL_DELAY_US,
 				   &status);
+#endif
 		if (ret < 0)
 			return ret;
 	}
@@ -985,6 +1019,9 @@ static const struct spinand_manufacturer *spinand_manufacturers[] = {
 #ifdef CONFIG_MTD_SPI_NAND_BIWIN
 	&biwin_spinand_manufacturer,
 #endif
+#ifdef CONFIG_MTD_SPI_NAND_CHUCUN
+	&chucun_spinand_manufacturer,
+#endif
 #ifdef CONFIG_MTD_SPI_NAND_DOSILICON
 	&dosilicon_spinand_manufacturer,
 #endif
@@ -1019,11 +1056,17 @@ static const struct spinand_manufacturer *spinand_manufacturers[] = {
 #ifdef CONFIG_MTD_SPI_NAND_JSC
 	&jsc_spinand_manufacturer,
 #endif
+#ifdef CONFIG_MTD_SPI_NAND_KINGSTON
+	&kingston_spinand_manufacturer,
+#endif
 #ifdef CONFIG_MTD_SPI_NAND_MACRONIX
 	&macronix_spinand_manufacturer,
 #endif
 #ifdef CONFIG_MTD_SPI_NAND_MICRON
 	&micron_spinand_manufacturer,
+#endif
+#ifdef CONFIG_MTD_SPI_NAND_MK
+	&mk_spinand_manufacturer,
 #endif
 #ifdef CONFIG_MTD_SPI_NAND_PARAGON
 	&paragon_spinand_manufacturer,
@@ -1033,6 +1076,9 @@ static const struct spinand_manufacturer *spinand_manufacturers[] = {
 #endif
 #ifdef CONFIG_MTD_SPI_NAND_SKYHIGH
 	&skyhigh_spinand_manufacturer,
+#endif
+#ifdef CONFIG_MTD_SPI_NAND_TITAN
+	&titan_spinand_manufacturer,
 #endif
 #ifdef CONFIG_MTD_SPI_NAND_TOSHIBA
 	&toshiba_spinand_manufacturer,

@@ -1063,8 +1063,11 @@ static void isp33_show(struct rkisp_device *dev, struct seq_file *p)
 	seq_printf(p, "%-10s %s(0x%x) bypass:%d lp_en:%d\n", "ENH", (val & 1) ? "ON" : "OFF",
 		   val, !!(val & BIT(1)), !!(val & BIT(2)));
 	val = rkisp_read(dev, ISP33_HIST_CTRL, false);
-	seq_printf(p, "%-10s %s(0x%x) bypass:%d\n", "HIST", (val & 1) ? "ON" : "OFF",
-		   val, !!(val & BIT(1)));
+	seq_printf(p, "%-10s %s(0x%x) bypass:%d block:0x%x thumb:0x%x\n",
+		   "HIST", (val & 1) ? "ON" : "OFF",
+		   val, !!(val & BIT(1)),
+		   rkisp_read(dev, ISP33_HIST_BLOCK_SIZE, false),
+		   rkisp_read(dev, ISP33_HIST_THUMB_SIZE, false));
 	val = rkisp_read(dev, ISP33_HSV_CTRL, false);
 	seq_printf(p, "%-10s %s(0x%x)\n", "HSV", (val & 1) ? "ON" : "OFF", val);
 	val = rkisp_read(dev, ISP3X_LDCH_STS, false);
@@ -1223,8 +1226,11 @@ static void isp35_show(struct rkisp_device *dev, struct seq_file *p)
 	seq_printf(p, "%-10s %s(0x%x) bypass:%d lp_en:%d\n", "ENH", (val & 1) ? "ON" : "OFF",
 		   val, !!(val & BIT(1)), !!(val & BIT(2)));
 	val = rkisp_read(dev, ISP33_HIST_CTRL, false);
-	seq_printf(p, "%-10s %s(0x%x) bypass:%d\n", "HIST", (val & 1) ? "ON" : "OFF",
-		   val, !!(val & BIT(1)));
+	seq_printf(p, "%-10s %s(0x%x) bypass:%d block:0x%x thumb:0x%x\n",
+		   "HIST", (val & 1) ? "ON" : "OFF",
+		   val, !!(val & BIT(1)),
+		   rkisp_read(dev, ISP33_HIST_BLOCK_SIZE, false),
+		   rkisp_read(dev, ISP33_HIST_THUMB_SIZE, false));
 	val = rkisp_read(dev, ISP33_HSV_CTRL, false);
 	seq_printf(p, "%-10s %s(0x%x)\n", "HSV", (val & 1) ? "ON" : "OFF", val);
 	val = rkisp_read(dev, ISP3X_LDCH_STS, false);
@@ -1382,9 +1388,9 @@ static int isp_show(struct seq_file *p, void *v)
 			   info,  sdev->dbg.frameloss,
 			   dev->rdbk_cnt, dev->rdbk_cnt_x1, dev->rdbk_cnt_x2, dev->rdbk_cnt_x3,
 			   rkisp_stream_buf_cnt(stream));
-		seq_printf(p, "\t   hw link:%d idle:%d vir(mode:%d index:%d) div:%d extend:%d\n",
+		seq_printf(p, "\t   hw link:%d idle:%d vir(mode:%d index:%d) div(h:%d v:%d) extend:%d\n",
 			   dev->hw_dev->dev_link_num, dev->hw_dev->is_idle,
-			   dev->multi_mode, dev->multi_index, dev->unite_div,
+			   dev->multi_mode, dev->multi_index, dev->unite.h_div, dev->unite.v_div,
 			   dev->hw_dev->unite_extend_pixel);
 	} else {
 		seq_printf(p, "%-10s frame:%d state:%s %s v-blank:%dus div:%d extend:%d\n",

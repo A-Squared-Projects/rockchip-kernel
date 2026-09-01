@@ -1428,6 +1428,12 @@ static void vop_enable_debug_irq(struct drm_crtc *crtc)
 		WIN2_EMPTY_INTR | WIN3_EMPTY_INTR | HWC_EMPTY_INTR |
 		POST_BUF_EMPTY_INTR;
 	VOP_INTR_SET_TYPE(vop, clear, irqs, 1);
+	/*
+	 * rk3572 vop lite can't auto clear the rdata fifo
+	 * empty intr clr bit. it need manual reset this bit.
+	 */
+	if (vop->version == VOP_VERSION_RK3572_LITE)
+		VOP_INTR_SET_TYPE(vop, clear, POST_BUF_EMPTY_INTR, 0);
 	VOP_INTR_SET_TYPE(vop, enable, irqs, 1);
 }
 
@@ -2128,7 +2134,8 @@ static void vop_initial(struct drm_crtc *crtc)
 	VOP_CTRL_SET(vop, afbdc_en, 0);
 	vop_enable_debug_irq(crtc);
 
-	if (vop->version == VOP_VERSION_RK3576_LITE) {
+	if (vop->version == VOP_VERSION_RK3572_LITE ||
+	    vop->version == VOP_VERSION_RK3576_LITE) {
 		VOP_GRF_SET(vop, grf, grf_vopl_sel, 1);
 		VOP_CTRL_SET(vop, enable, 1);
 	}
@@ -2602,6 +2609,7 @@ static void vop_plane_atomic_update(struct drm_plane *plane,
 	}
 	if ((vop->version == VOP_VERSION_RK3036 ||
 	     vop->version == VOP_VERSION_RK3506 ||
+	     vop->version == VOP_VERSION_RK3572_LITE ||
 	     vop->version == VOP_VERSION_RK3576_LITE ||
 	     vop->version == VOP_VERSION_RV1126B) &&
 	    (adjusted_mode->flags & DRM_MODE_FLAG_INTERLACE))
@@ -2620,6 +2628,7 @@ static void vop_plane_atomic_update(struct drm_plane *plane,
 	dsp_sty = dest->y1 + mode->crtc_vtotal - mode->crtc_vsync_start;
 	if ((vop->version == VOP_VERSION_RK3036 ||
 	     vop->version == VOP_VERSION_RK3506 ||
+	     vop->version == VOP_VERSION_RK3572_LITE ||
 	     vop->version == VOP_VERSION_RK3576_LITE ||
 	     vop->version == VOP_VERSION_RV1126B) &&
 	    (adjusted_mode->flags & DRM_MODE_FLAG_INTERLACE))
@@ -3251,9 +3260,12 @@ static int vop_crtc_debugfs_dump(struct drm_crtc *crtc, struct seq_file *s)
 	struct vop *vop = to_vop(crtc);
 	struct drm_crtc_state *crtc_state = crtc->state;
 	struct drm_display_mode *mode = &crtc->state->adjusted_mode;
+	struct drm_display_mode tmp;
 	struct rockchip_crtc_state *state = to_rockchip_crtc_state(crtc->state);
 	bool interlaced = !!(mode->flags & DRM_MODE_FLAG_INTERLACE);
 	struct drm_plane *plane;
+	u64 dividend, dclk_rate_kHz;
+	u32 actual_fps_x100;
 	int i;
 
 	DEBUG_PRINT("VOP [%s]: %s\n", dev_name(vop->dev),
@@ -3262,6 +3274,19 @@ static int vop_crtc_debugfs_dump(struct drm_crtc *crtc, struct seq_file *s)
 	if (!crtc_state->active)
 		return 0;
 
+	drm_mode_copy(&tmp, mode);
+	/* Use crtc timing to calculate actual refresh rate */
+	tmp.clock = tmp.crtc_clock / DIV_ROUND_CLOSEST(tmp.crtc_clock, tmp.clock);
+	tmp.htotal = tmp.crtc_htotal;
+	tmp.vtotal = tmp.crtc_vtotal;
+	/* Calculate refresh rate multiplied by 100 to keep two decimal precision */
+	tmp.clock *= 100;
+	/* Convert VOP dclk from Hz to kHz for DRM mode */
+	dclk_rate_kHz = clk_get_rate(vop->dclk) / 1000;
+
+	dividend = mul_u32_u32(drm_mode_vrefresh(&tmp), dclk_rate_kHz);
+	actual_fps_x100 = div64_u64(dividend, mode->crtc_clock);
+
 	vop_dump_connector_on_crtc(crtc, s);
 	DEBUG_PRINT("\tbus_format[%x]: %s\n", state->bus_format,
 		    drm_get_bus_format_name(state->bus_format));
@@ -3269,12 +3294,12 @@ static int vop_crtc_debugfs_dump(struct drm_crtc *crtc, struct seq_file *s)
 		    state->yuv_overlay, state->output_mode);
 	DEBUG_PRINT("color-encoding[%d] color-range[%d]\n",
 		    state->color_encoding, state->color_range);
-	DEBUG_PRINT("    Display mode: %dx%d%s%d\n",
+	DEBUG_PRINT("    Display mode: %dx%d%s%u.%02u\n",
 		    mode->hdisplay, mode->vdisplay, interlaced ? "i" : "p",
-		    drm_mode_vrefresh(mode));
-	DEBUG_PRINT("\tdclk[%d kHz] real_dclk[%d kHz] aclk[%ld kHz] type[%x] flag[%x]\n",
-		    mode->clock, mode->crtc_clock, clk_get_rate(vop->aclk) / 1000,
-		    mode->type, mode->flags);
+		    actual_fps_x100 / 100, actual_fps_x100 % 100);
+	DEBUG_PRINT("\tdclk[%d kHz] crtc_dclk[%d kHz] real_dclk[%lu kHz] aclk[%ld kHz] type[%x] flag[%x]\n",
+		    mode->clock, mode->crtc_clock, clk_get_rate(vop->dclk) / 1000,
+		    clk_get_rate(vop->aclk) / 1000, mode->type, mode->flags);
 	DEBUG_PRINT("\tH: %d %d %d %d\n", mode->hdisplay, mode->hsync_start,
 		    mode->hsync_end, mode->htotal);
 	DEBUG_PRINT("\tV: %d %d %d %d\n", mode->vdisplay, mode->vsync_start,
@@ -3434,7 +3459,7 @@ vop_crtc_mode_valid(struct drm_crtc *crtc, const struct drm_display_mode *mode)
 
 	/*
 	 * Dclk need to be double if BT656 interface and vop version >= 2.12.
-	 * That is RV1126/RV1106/RK3576_LITE/RK3506/RV1126B
+	 * That is RV1126/RV1106/RK3572_LITE/RK3576_LITE/RK3506/RV1126B
 	 */
 	if (mode->flags & DRM_MODE_FLAG_DBLCLK ||
 	    (vop->version >= VOP_VERSION_RV1106 && vop->version <= VOP_VERSION_RK3288 &&
@@ -3908,7 +3933,7 @@ static bool vop_crtc_mode_fixup(struct drm_crtc *crtc,
 
 	/*
 	 * Dclk need to be double if BT656 interface and vop version >= 2.12.
-	 * That is RV1126/RV1106/RK3576_LITE/RK3506/RV1126B
+	 * That is RV1126/RV1106/RK3572_LITE/RK3576_LITE/RK3506/RV1126B
 	 */
 	if (mode->flags & DRM_MODE_FLAG_DBLCLK ||
 	    (vop->version >= VOP_VERSION_RV1106 && vop->version <= VOP_VERSION_RK3288 &&
@@ -4015,7 +4040,7 @@ static void vop_update_csc(struct drm_crtc *crtc)
 	u32 val;
 
 	/*
-	 * When using BT656, set RV1126/RV1106/RK3576_LITE/RK3506/RV1126B to P8888 mode.
+	 * When using BT656, set RV1126/RV1106/RK3572_LITE/RK3576_LITE/RK3506/RV1126B to P8888 mode.
 	 */
 	if ((s->output_mode == ROCKCHIP_OUT_MODE_AAAA &&
 	     !(vop->data->feature & VOP_FEATURE_OUTPUT_10BIT)) ||
@@ -4033,7 +4058,9 @@ static void vop_update_csc(struct drm_crtc *crtc)
 	 * For RK3576 vopl, rg_swap and rb_swap need to be enabled in
 	 * YUV444 bus_format.
 	 */
-	if (vop->version == VOP_VERSION_RK3576_LITE && s->bus_format == MEDIA_BUS_FMT_YUV8_1X24)
+	if ((vop->version == VOP_VERSION_RK3572_LITE ||
+	     vop->version == VOP_VERSION_RK3576_LITE) &&
+	    s->bus_format == MEDIA_BUS_FMT_YUV8_1X24)
 		VOP_CTRL_SET(vop, dsp_data_swap, DSP_RG_SWAP | DSP_RB_SWAP);
 
 	VOP_CTRL_SET(vop, out_mode, s->output_mode);
@@ -4053,7 +4080,8 @@ static void vop_update_csc(struct drm_crtc *crtc)
 	 */
 	if (!is_yuv_output(s->bus_format))
 		val = 0;
-	else if (vop->version == VOP_VERSION_RK3576_LITE)
+	else if (vop->version == VOP_VERSION_RK3572_LITE ||
+		 vop->version == VOP_VERSION_RK3576_LITE)
 		val = 0;
 	else if (vop->version == VOP_VERSION_RK3328 && s->hdr.pre_overlay)
 		val = 0;
@@ -4162,11 +4190,20 @@ static void vop_crtc_atomic_enable(struct drm_crtc *crtc,
 			VOP_CTRL_SET(vop, bt656_data_map_mode, s->data_map_mode);
 		else if (vop->mcu_timing.mcu_pix_total)
 			VOP_CTRL_SET(vop, mcu_data_map_mode, s->data_map_mode);
+		else if (s->output_if & VOP_OUTPUT_IF_RGB)
+			VOP_CTRL_SET(vop, mcu_data_map_mode, s->data_map_mode);
 	}
 
 	if (vop->mcu_timing.mcu_pix_total) {
 		/*
-		 * For RK3576_LITE/RK3506/RV1126B
+		 * For RK3572_LITE, in order to ensure MCU interface works well,
+		 * set inf_out_en before mcu_hold_mode enabled.
+		 */
+		if (vop->version == VOP_VERSION_RK3572_LITE)
+			VOP_CTRL_SET(vop, inf_out_en, 1);
+
+		/*
+		 * For RK3572_LITE/RK3576_LITE/RK3506/RV1126B
 		 */
 		if (vop->version >= VOP_VERSION_RK3576_LITE && vop->version <= VOP_VERSION_RK3288)
 			vop_set_out_mode(vop, s->output_mode);
@@ -4199,6 +4236,9 @@ static void vop_crtc_atomic_enable(struct drm_crtc *crtc,
 		 */
 		if (vop->version == VOP_VERSION_RV1106 || vop->version == VOP_VERSION_RK3506)
 			dclk_inv = !dclk_inv;
+
+		if (vop->version == VOP_VERSION_RK3572_LITE)
+			VOP_CTRL_SET(vop, inf_out_en, 1);
 		fallthrough;
 	case DRM_MODE_CONNECTOR_LVDS:
 		VOP_CTRL_SET(vop, rgb_en, 1);
@@ -4800,13 +4840,13 @@ static void vop_tv_config_update(struct drm_crtc *crtc,
 
 	if (vop_data->feature & VOP_FEATURE_OUTPUT_10BIT)
 		brightness = interpolate(0, -128, 100, 127, s->tv_state->brightness);
-	else if (vop->version == VOP_VERSION_PX30_BIG || vop->version >= VOP_VERSION_RK3506)
+	else if (vop->version == VOP_VERSION_PX30_BIG || vop->version >= VOP_VERSION_RV1126)
 		brightness = interpolate(0, -64, 100, 63, s->tv_state->brightness);
 	else
 		brightness = interpolate(0, -32, 100, 31, s->tv_state->brightness);
 
 	if ((VOP_MAJOR(vop->version) == 3) ||
-	    (VOP_MAJOR(vop->version) == 2 && VOP_MINOR(vop->version) == 6)) { /* px30 vopb */
+	    vop->version == VOP_VERSION_PX30_BIG || vop->version >= VOP_VERSION_RV1126) {
 		contrast = interpolate(0, 0, 100, 511, s->tv_state->contrast);
 		saturation = interpolate(0, 0, 100, 511, s->tv_state->saturation);
 		/*
@@ -4816,8 +4856,14 @@ static void vop_tv_config_update(struct drm_crtc *crtc,
 		 *  a:[0~30]
 		 *    sin_hue = sin(a)*256;
 		 *    cos_hue = cos(a)*256;
+		 *
+		 * BCSH uses clockwise as positive hue angle while CSC(in VOP2
+		 * and VOP3) uses counter-clockwise. Unify to counter-clockwise
+		 * as positive direction: invert the configured hue parameter
+		 * for BCSH.
 		 */
-		hue = interpolate(0, -30, 100, 30, s->tv_state->hue);
+
+		hue = interpolate(0, 30, 100, -30, s->tv_state->hue);
 		sin_hue = fixp_sin32(hue) >> 23;
 		cos_hue = fixp_cos32(hue) >> 23;
 		VOP_CTRL_SET(vop, bcsh_sat_con, saturation * contrast / 0x100);
@@ -4832,8 +4878,13 @@ static void vop_tv_config_update(struct drm_crtc *crtc,
 		 *  a:[0~30]
 		 *    sin_hue = sin(a)*128;
 		 *    cos_hue = cos(a)*128;
+		 *
+		 * BCSH uses clockwise as positive hue angle while CSC(in VOP2
+		 * and VOP3) uses counter-clockwise. Unify to counter-clockwise
+		 * as positive direction: invert the configured hue parameter
+		 * for BCSH.
 		 */
-		hue = interpolate(0, -30, 100, 30, s->tv_state->hue);
+		hue = interpolate(0, 30, 100, -30, s->tv_state->hue);
 		sin_hue = fixp_sin32(hue) >> 24;
 		cos_hue = fixp_cos32(hue) >> 24;
 		VOP_CTRL_SET(vop, bcsh_sat_con, saturation * contrast / 0x80);
@@ -5335,8 +5386,15 @@ static irqreturn_t vop_isr(int irq, void *data)
 
 	active_irqs = VOP_INTR_GET_TYPE(vop, status, INTR_MASK);
 	/* Clear all active interrupt sources */
-	if (active_irqs)
+	if (active_irqs) {
 		VOP_INTR_SET_TYPE(vop, clear, active_irqs, 1);
+		/*
+		 * rk3572 vop lite can't auto clear the rdata fifo
+		 * empty intr clr bit. it need manual reset this bit.
+		 */
+		if (vop->version == VOP_VERSION_RK3572_LITE && (active_irqs & POST_BUF_EMPTY_INTR))
+			VOP_INTR_SET_TYPE(vop, clear, POST_BUF_EMPTY_INTR, 0);
+	}
 	wb_irqs = vop_read_and_clear_wb_irqs(vop);
 
 	spin_unlock_irqrestore(&vop->irq_lock, flags);

@@ -157,7 +157,8 @@
 enum inno_hdmi_phy_type {
 	INNO_HDMI_PHY_RK3228,
 	INNO_HDMI_PHY_RK3328,
-	INNO_HDMI_PHY_RK3528
+	INNO_HDMI_PHY_RK3528,
+	INNO_HDMI_PHY_RK3538,
 };
 
 struct phy_config {
@@ -189,7 +190,6 @@ struct inno_hdmi_phy {
 	struct clk *pclk;
 	unsigned long pixclock;
 	unsigned long tmdsclock;
-	struct dentry *debugfs_dir;
 };
 
 struct pre_pll_config {
@@ -350,7 +350,19 @@ static const struct phy_config rk3328_phy_cfg[] = {
 };
 
 static const struct phy_config rk3528_phy_cfg[] = {
-	/* tmdsclk bias-clk bias-data voltage-clk voltage-data pre-emphasis-data */
+	/*
+	 * phy_config regs[] layout:
+	 *   [0]: bias clk
+	 *   [1]: bias data
+	 *   [2]: voltage clk
+	 *   [3]: voltage data
+	 *   [4]: pre-emphasis
+	 *   [5..6]: term refs ctrl
+	 *   [7]: term res clk val
+	 *   [8]: term res data val
+	 *   [9]: ref res ctrl
+	 *   [10..13]: reserved
+	 */
 	{	165000000, {
 			0x02, 0x04, 0x0f, 0x0f, 0x00, 0x76, 0x83, 0x0a, 0x0a,
 			0x00, 0x00, 0x00, 0x00, 0x00,
@@ -743,7 +755,8 @@ static int inno_hdmi_phy_power_on(struct phy *phy)
 	else if (inno->plat_data->dev_type == INNO_HDMI_PHY_RK3228 &&
 		 tmdsclock <= 33750000 && inno->efuse_flag)
 		chipversion = 4;
-	else if (inno->plat_data->dev_type == INNO_HDMI_PHY_RK3528)
+	else if (inno->plat_data->dev_type == INNO_HDMI_PHY_RK3528 ||
+		 inno->plat_data->dev_type == INNO_HDMI_PHY_RK3538)
 		chipversion = 8;
 
 	for (; cfg->tmdsclock != ~0UL; cfg++)
@@ -780,10 +793,109 @@ static int inno_hdmi_phy_power_off(struct phy *phy)
 	return 0;
 }
 
+static int inno_hdmi_phy_regs_show(struct seq_file *s, void *v)
+{
+	struct inno_hdmi_phy *inno = s->private;
+	u32 i, val;
+
+	seq_puts(s, "regs val\n");
+	for (i = 0; i < 0xf3; i++) {
+		val = inno_read(inno, i);
+		seq_printf(s, "%02x %04x\n", i, val);
+	}
+
+	return 0;
+}
+
+static int inno_hdmi_phy_regs_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, inno_hdmi_phy_regs_show, inode->i_private);
+}
+
+static ssize_t
+inno_hdmi_phy_write(struct file *file, const char __user *buf,
+		    size_t count, loff_t *ppos)
+{
+	struct inno_hdmi_phy *inno =
+		((struct seq_file *)file->private_data)->private;
+	u32 reg, val;
+	char kbuf[25];
+
+	if (count > sizeof(kbuf) - 1)
+		return -EINVAL;
+	if (copy_from_user(kbuf, buf, count))
+		return -EFAULT;
+	kbuf[count] = '\0';
+	if (sscanf(kbuf, "%x%x", &reg, &val) != 2)
+		return -EFAULT;
+	if (reg > 0xf2) {
+		dev_err(inno->dev, "it is not a inno hdmi phy register\n");
+		return count;
+	}
+	dev_info(inno->dev, "/*******inno hdmi phy register config******/\n");
+	dev_info(inno->dev, " reg=%x val=%x\n", reg, val);
+	inno_write(inno, reg, val);
+	return count;
+}
+
+static const struct file_operations inno_hdmi_regs_fops = {
+	.owner = THIS_MODULE,
+	.open = inno_hdmi_phy_regs_open,
+	.read = seq_read,
+	.write = inno_hdmi_phy_write,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
+static int inno_hdmi_phy_register_debugfs(struct inno_hdmi_phy *inno)
+{
+	struct dentry *dri_dir, *card_dir, *connector_dir;
+	char name[16];
+	int i;
+
+	dri_dir = debugfs_lookup("dri", NULL);
+	if (IS_ERR_OR_NULL(dri_dir)) {
+		dev_warn(inno->dev, "debugfs: 'dri' directory not found\n");
+		return -ENODEV;
+	}
+
+	for (i = 0; i < 8; i++) {
+		snprintf(name, sizeof(name), "%d", i);
+		card_dir = debugfs_lookup(name, dri_dir);
+		if (!card_dir)
+			continue;
+
+		connector_dir = debugfs_lookup("hdmi0", card_dir);
+		dput(card_dir);
+
+		if (connector_dir) {
+			debugfs_create_file("phy", 0600, connector_dir, inno,
+					    &inno_hdmi_regs_fops);
+			dput(connector_dir);
+			dput(dri_dir);
+			return 0;
+		}
+	}
+
+	dput(dri_dir);
+	dev_warn(inno->dev, "debugfs: 'hdmi0' not found under dri\n");
+	return -ENODEV;
+}
+
+static int inno_hdmi_phy_init(struct phy *phy)
+{
+	struct inno_hdmi_phy *inno = phy_get_drvdata(phy);
+
+	inno_hdmi_phy_register_debugfs(inno);
+
+	return 0;
+}
+
 static const struct phy_ops inno_hdmi_phy_ops = {
 	.owner	   = THIS_MODULE,
 	.power_on  = inno_hdmi_phy_power_on,
 	.power_off = inno_hdmi_phy_power_off,
+	.init      = inno_hdmi_phy_init,
 };
 
 static int inno_hdmi_phy_clk_is_prepared(struct clk_hw *hw)
@@ -802,6 +914,7 @@ static int inno_hdmi_phy_clk_is_prepared(struct clk_hw *hw)
 static int inno_hdmi_phy_clk_prepare(struct clk_hw *hw)
 {
 	struct inno_hdmi_phy *inno = to_inno_hdmi_phy(hw);
+	int ret;
 
 	if (inno->plat_data->dev_type == INNO_HDMI_PHY_RK3228)
 		inno_update_bits(inno, 0xe0, PRE_PLL_POWER_MASK,
@@ -809,7 +922,16 @@ static int inno_hdmi_phy_clk_prepare(struct clk_hw *hw)
 	else
 		inno_update_bits(inno, 0xa0, 1, 0);
 
-	return 0;
+	/*
+	 * If pixclock has been previously configured, restore the saved rate;
+	 * otherwise, default to 74.25MHz.
+	 */
+	if (inno->pixclock)
+		ret = inno_hdmi_phy_clk_set_rate(hw, inno->pixclock, FREF);
+	else
+		ret = inno_hdmi_phy_clk_set_rate(hw, 74250000, FREF);
+
+	return ret;
 }
 
 static void inno_hdmi_phy_clk_unprepare(struct clk_hw *hw)
@@ -870,6 +992,10 @@ static int inno_hdmi_phy_clk_set_rate(struct clk_hw *hw, unsigned long rate,
 	dev_dbg(inno->dev, "%s rate %lu tmdsclk %u\n",
 		__func__, rate, tmdsclock);
 
+	/* Get the current hardware actual PLL frequency configuration */
+	inno->tmdsclock = inno_hdmi_phy_clk_recalc_rate(hw, parent_rate);
+	inno->tmdsclock = inno_hdmi_phy_get_tmdsclk(inno, inno->tmdsclock);
+
 	if (inno->tmdsclock == tmdsclock)
 		return 0;
 
@@ -914,7 +1040,8 @@ static int inno_hdmi_phy_clk_register(struct inno_hdmi_phy *inno)
 	const char *parent_name;
 	int ret;
 
-	if (inno->plat_data->dev_type == INNO_HDMI_PHY_RK3528)
+	if (inno->plat_data->dev_type == INNO_HDMI_PHY_RK3528 ||
+	    inno->plat_data->dev_type == INNO_HDMI_PHY_RK3538)
 		clk_np = of_get_child_by_name(np, "clk-port");
 
 	if (!clk_np)
@@ -1435,6 +1562,9 @@ inno_hdmi_phy_rk3528_power_on(struct inno_hdmi_phy *inno,
 	inno_write(inno, 0xca, phy_cfg->regs[8]);
 	inno_write(inno, 0xcb, phy_cfg->regs[8]);
 
+	/* set Reference resistor control*/
+	inno_update_bits(inno, 0xb0, BIT(1), phy_cfg->regs[9] ? BIT(1) : 0);
+
 	/* set TMDS sync detection counter length */
 	temp = 47520000000;
 	do_div(temp, inno->tmdsclock);
@@ -1570,7 +1700,7 @@ inno_hdmi_rk3528_phy_pll_recalc_rate(struct inno_hdmi_phy *inno,
 		frac = inno_read(inno, 0xd3) |
 		       (inno_read(inno, 0xd2) << 8) |
 		       (inno_read(inno, 0xd1) << 16);
-		vco += DIV_ROUND_CLOSEST(parent_rate * frac, (1 << 24));
+		vco += DIV_ROUND_CLOSEST((u64)parent_rate * frac, (1 << 24));
 	}
 	if (inno_read(inno, 0xa0) & 2) {
 		do_div(vco, nd * 5);
@@ -1626,128 +1756,6 @@ inno_hdmi_rk3228_phy_pll_recalc_rate(struct inno_hdmi_phy *inno,
 	return inno->pixclock;
 }
 
-static int inno_hdmi_status_show(struct seq_file *s, void *v)
-{
-	struct inno_hdmi_phy *inno = s->private;
-	bool pre_pll_lock, post_pll_lock, phy_status;
-	u8 sync_status;
-
-	seq_printf(s, "phy power count %d\tbus_width %d\n",
-		   inno->phy->power_count, phy_get_bus_width(inno->phy));
-	seq_printf(s, "dclk %lu\t\ttmdsclk %lu\n",
-		   inno->pixclock, inno->tmdsclock);
-
-	if (inno->plat_data->dev_type == INNO_HDMI_PHY_RK3328 ||
-	    inno->plat_data->dev_type == INNO_HDMI_PHY_RK3528) {
-		sync_status = inno_read(inno, 0xdd);
-		pre_pll_lock = inno_read(inno, 0xa9) & BIT(0);
-		post_pll_lock = inno_read(inno, 0xaf) & BIT(0);
-		phy_status = inno_read(inno, 0xaa) & BIT(0);
-	} else {
-		pre_pll_lock = inno_read(inno, 0xe8) & PRE_PLL_LOCK_STATUS;
-		post_pll_lock = inno_read(inno, 0xeb) & POST_PLL_LOCK_STATUS;
-		phy_status = inno_read(inno, 0xe0) & POST_PLL_POWER_MASK;
-	}
-
-	seq_printf(s, "Pre-PLL %s\t\tPost-PLL %s\n",
-		   pre_pll_lock ? "lock" : "unlock",
-		   post_pll_lock ? "lock" : "unlock");
-	seq_printf(s, "PHY Power %s", phy_status ? "Off" : "On");
-	if (inno->plat_data->dev_type == INNO_HDMI_PHY_RK3328 ||
-	    inno->plat_data->dev_type == INNO_HDMI_PHY_RK3528)
-		seq_printf(s, "\t\tD0 %s\nD1 %s\t\t\tD2 %s\n",
-			   sync_status & BIT(0) ? "lock" : "unlock",
-			   sync_status & BIT(1) ? "lock" : "unlock",
-			   sync_status & BIT(2) ? "lock" : "unlock");
-	return 0;
-}
-
-static int inno_hdmi_status_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, inno_hdmi_status_show, inode->i_private);
-}
-
-static const struct file_operations inno_hdmi_status_fops = {
-	.owner = THIS_MODULE,
-	.open = inno_hdmi_status_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-
-static int inno_hdmi_regs_show(struct seq_file *s, void *v)
-{
-	struct inno_hdmi_phy *inno = s->private;
-	u32 i, val;
-
-	seq_puts(s, "regs val\n");
-	for (i = 0; i < 0xf3; i++) {
-		val = inno_read(inno, i);
-		seq_printf(s, "%02x %04x\n", i, val);
-	}
-
-	return 0;
-}
-
-static int inno_hdmi_regs_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, inno_hdmi_regs_show, inode->i_private);
-}
-
-static ssize_t
-inno_hdmi_phy_write(struct file *file, const char __user *buf,
-		    size_t count, loff_t *ppos)
-{
-	struct inno_hdmi_phy *inno =
-		((struct seq_file *)file->private_data)->private;
-	u32 reg, val;
-	char kbuf[25];
-
-	if (count > sizeof(kbuf) - 1)
-		return -EINVAL;
-	if (copy_from_user(kbuf, buf, count))
-		return -EFAULT;
-	kbuf[count] = '\0';
-	if (sscanf(kbuf, "%x%x", &reg, &val) == -1)
-		return -EFAULT;
-	if (reg > 0xf2) {
-		dev_err(inno->dev, "it is not a inno hdmi phy register\n");
-		return count;
-	}
-	dev_info(inno->dev, "/*******inno hdmi phy register config******/\n");
-	dev_info(inno->dev, " reg=%x val=%x\n", reg, val);
-	inno_write(inno, reg, val);
-	return count;
-}
-
-static const struct file_operations inno_hdmi_regs_fops = {
-	.owner = THIS_MODULE,
-	.open = inno_hdmi_regs_open,
-	.read = seq_read,
-	.write = inno_hdmi_phy_write,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
-
-static void
-inno_hdmi_phy_register_debugfs(struct device *dev, struct inno_hdmi_phy *inno)
-{
-	u8 buf[15];
-
-	snprintf(buf, sizeof(buf), "inno-hdmi-phy%d", inno->id);
-	inno->debugfs_dir = debugfs_create_dir(buf, NULL);
-	if (IS_ERR(inno->debugfs_dir)) {
-		dev_err(dev, "failed to create debugfs dir!\n");
-		return;
-	}
-
-	debugfs_create_file("status", 0400, inno->debugfs_dir,
-			    inno, &inno_hdmi_status_fops);
-
-	debugfs_create_file("regs", 0600, inno->debugfs_dir,
-			    inno, &inno_hdmi_regs_fops);
-}
-
 static const struct inno_hdmi_phy_ops rk3228_hdmi_phy_ops = {
 	.init = inno_hdmi_phy_rk3228_init,
 	.power_on = inno_hdmi_phy_rk3228_power_on,
@@ -1790,6 +1798,12 @@ static const struct inno_hdmi_phy_drv_data rk3528_hdmi_phy_drv_data = {
 	.phy_cfg_table = rk3528_phy_cfg,
 };
 
+static const struct inno_hdmi_phy_drv_data rk3538_hdmi_phy_drv_data = {
+	.dev_type = INNO_HDMI_PHY_RK3538,
+	.ops = &rk3528_hdmi_phy_ops,
+	.phy_cfg_table = rk3528_phy_cfg,
+};
+
 static const struct of_device_id inno_hdmi_phy_of_match[] = {
 	{ .compatible = "rockchip,rk3228-hdmi-phy",
 	  .data = &rk3228_hdmi_phy_drv_data
@@ -1799,6 +1813,9 @@ static const struct of_device_id inno_hdmi_phy_of_match[] = {
 	},
 	{ .compatible = "rockchip,rk3528-hdmi-phy",
 	  .data = &rk3528_hdmi_phy_drv_data
+	},
+	{ .compatible = "rockchip,rk3538-hdmi-phy",
+	  .data = &rk3538_hdmi_phy_drv_data
 	},
 	{}
 };
@@ -1961,7 +1978,7 @@ static int inno_hdmi_phy_probe(struct platform_device *pdev)
 			goto err_irq;
 	}
 	platform_set_drvdata(pdev, inno);
-	inno_hdmi_phy_register_debugfs(dev, inno);
+
 	return 0;
 
 err_irq:
@@ -1975,7 +1992,6 @@ static int inno_hdmi_phy_remove(struct platform_device *pdev)
 {
 	struct inno_hdmi_phy *inno = platform_get_drvdata(pdev);
 
-	debugfs_remove_recursive(inno->debugfs_dir);
 	of_clk_del_provider(pdev->dev.of_node);
 	clk_disable_unprepare(inno->sysclk);
 	return 0;

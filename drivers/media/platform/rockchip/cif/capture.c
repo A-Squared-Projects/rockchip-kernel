@@ -392,6 +392,14 @@ static const struct cif_output_fmt out_fmts[] = {
 		.raw_bpp = 14,
 		.csi_fmt_val = CSI_WRDDR_TYPE_RAW14_RK3588,
 		.fmt_type = CIF_FMT_TYPE_RAW,
+	}, {
+		.fourcc = V4L2_PIX_FMT_Y210,
+		.cplanes = 1,
+		.mplanes = 1,
+		.bpp = { 16 },
+		.raw_bpp = 10,
+		.csi_fmt_val = CSI_WRDDR_TYPE_RAW10,
+		.fmt_type = CIF_FMT_TYPE_RAW,
 	},
 	/* TODO: We can support NV12M/NV21M/NV16M/NV61M too */
 };
@@ -647,6 +655,26 @@ static const struct cif_input_fmt in_fmts[] = {
 		.csi_fmt_val	= CSI_WRDDR_TYPE_RAW14_RK3588,
 		.fmt_type	= CIF_FMT_TYPE_RAW,
 		.field		= V4L2_FIELD_NONE,
+	}, {
+		.mbus_code	= MEDIA_BUS_FMT_UYVY10_2X10,
+		.csi_fmt_val	= CSI_WRDDR_TYPE_RAW10,
+		.fmt_type	= CIF_FMT_TYPE_RAW,
+		.field		= V4L2_FIELD_NONE,
+	}, {
+		.mbus_code	= MEDIA_BUS_FMT_VYUY10_2X10,
+		.csi_fmt_val	= CSI_WRDDR_TYPE_RAW10,
+		.fmt_type	= CIF_FMT_TYPE_RAW,
+		.field		= V4L2_FIELD_NONE,
+	}, {
+		.mbus_code	= MEDIA_BUS_FMT_YUYV10_2X10,
+		.csi_fmt_val	= CSI_WRDDR_TYPE_RAW10,
+		.fmt_type	= CIF_FMT_TYPE_RAW,
+		.field		= V4L2_FIELD_NONE,
+	}, {
+		.mbus_code	= MEDIA_BUS_FMT_YVYU10_2X10,
+		.csi_fmt_val	= CSI_WRDDR_TYPE_RAW10,
+		.fmt_type	= CIF_FMT_TYPE_RAW,
+		.field		= V4L2_FIELD_NONE,
 	},
 };
 
@@ -667,7 +695,7 @@ static int rkcif_output_fmt_check(struct rkcif_stream *stream,
 				  const struct cif_output_fmt *output_fmt)
 {
 	const struct cif_input_fmt *input_fmt = stream->cif_fmt_in;
-	struct csi_channel_info *channel = &stream->cifdev->channels[stream->id];
+	struct csi_channel_info *channel = &stream->channel_info;
 	int ret = -EINVAL;
 
 	stream->rounding_bit = 0;
@@ -834,6 +862,13 @@ static int rkcif_output_fmt_check(struct rkcif_stream *stream,
 		    output_fmt->fourcc == V4L2_PIX_FMT_Y14)
 			ret = 0;
 		break;
+	case MEDIA_BUS_FMT_UYVY10_2X10:
+	case MEDIA_BUS_FMT_VYUY10_2X10:
+	case MEDIA_BUS_FMT_YUYV10_2X10:
+	case MEDIA_BUS_FMT_YVYU10_2X10:
+		if (output_fmt->fourcc == V4L2_PIX_FMT_Y210)
+			ret = 0;
+		break;
 	default:
 		break;
 	}
@@ -849,6 +884,7 @@ static int rkcif_output_fmt_check(struct rkcif_stream *stream,
 }
 
 static int rkcif_stop_dma_capture(struct rkcif_stream *stream);
+static void rkcif_flush_rdbk_rx_toisp(struct rkcif_device *dev, const char *reason);
 
 struct rkcif_rx_buffer *to_cif_rx_buf(struct rkisp_rx_buf *dbufs)
 {
@@ -936,12 +972,12 @@ static struct rkcif_sensor_info *sd_to_sensor(struct rkcif_device *dev,
 	return NULL;
 }
 
-static bool is_deserializer_name(const char *name)
+static bool is_deserializer_name(const struct v4l2_subdev *sd)
 {
-	if (!name)
+	if (!sd)
 		return false;
 
-	return strstr(name, "-des");
+	return strstr(sd->name, "-des") != NULL;
 }
 
 static unsigned char get_data_type(u32 pixelformat, u8 cmd_mode_en, u8 dsi_input)
@@ -1015,6 +1051,11 @@ static unsigned char get_data_type(u32 pixelformat, u8 cmd_mode_en, u8 dsi_input
 		return 0x1a;//use for yuv420_8bit legacy input
 	case MEDIA_BUS_FMT_YUV8_1X24:
 		return 0x18;//use for yuv420_8bit input
+	case MEDIA_BUS_FMT_UYVY10_2X10:
+	case MEDIA_BUS_FMT_VYUY10_2X10:
+	case MEDIA_BUS_FMT_YUYV10_2X10:
+	case MEDIA_BUS_FMT_YVYU10_2X10:
+		return 0x1f;
 	default:
 		return 0x2b;
 	}
@@ -1074,8 +1115,12 @@ cif_input_fmt *rkcif_get_input_fmt(struct rkcif_device *dev, struct v4l2_rect *r
 			csi_info->vc = pad_id;
 		if (ch_info.data_type > 0)
 			csi_info->data_type = ch_info.data_type;
+		else
+			csi_info->data_type = 0;
 		if (ch_info.data_bit > 0)
 			csi_info->data_bit = ch_info.data_bit;
+		else
+			csi_info->data_bit = 0;
 		if (ch_info.field == 0)
 			fmt.format.field = fmt.format.field;
 		else
@@ -1747,6 +1792,7 @@ static void rkcif_enable_capture(struct rkcif_stream *stream)
 	rkcif_write_register_or(stream->cifdev,
 				get_reg_index_of_id_ctrl0(stream->id),
 				ENABLE_CAPTURE);
+	stream->is_pause_stream = false;
 }
 
 static void rkcif_disable_capture(struct rkcif_stream *stream)
@@ -1754,6 +1800,7 @@ static void rkcif_disable_capture(struct rkcif_stream *stream)
 	rkcif_write_register_and(stream->cifdev,
 				 get_reg_index_of_id_ctrl0(stream->id),
 				 ~ENABLE_CAPTURE);
+	stream->is_pause_stream = true;
 }
 
 int rkcif_get_linetime(struct rkcif_stream *stream)
@@ -1826,7 +1873,7 @@ static int rkcif_assign_new_buffer_oneframe(struct rkcif_stream *stream,
 			rkcif_write_register(dev, CIF_REG_DVP_FRM0_ADDR_UV,
 					     stream->curr_buf->buff_addr[RKCIF_PLANE_CBCR]);
 		} else {
-			if (dummy_buf->vaddr) {
+			if (dummy_buf->is_allocated) {
 				rkcif_write_register(dev, CIF_REG_DVP_FRM0_ADDR_Y,
 						     dummy_buf->dma_addr);
 				rkcif_write_register(dev, CIF_REG_DVP_FRM0_ADDR_UV,
@@ -1848,7 +1895,7 @@ static int rkcif_assign_new_buffer_oneframe(struct rkcif_stream *stream,
 			rkcif_write_register(dev, CIF_REG_DVP_FRM1_ADDR_UV,
 					     stream->next_buf->buff_addr[RKCIF_PLANE_CBCR]);
 		} else {
-			if (dummy_buf->vaddr) {
+			if (dummy_buf->is_allocated) {
 				rkcif_write_register(dev, CIF_REG_DVP_FRM1_ADDR_Y,
 						     dummy_buf->dma_addr);
 				rkcif_write_register(dev, CIF_REG_DVP_FRM1_ADDR_UV,
@@ -1869,9 +1916,9 @@ static int rkcif_assign_new_buffer_oneframe(struct rkcif_stream *stream,
 				buffer = stream->next_buf;
 			}
 		} else {
-			if (dummy_buf->vaddr && stream->frame_phase == CIF_CSI_FRAME0_READY)
+			if (dummy_buf->is_allocated && stream->frame_phase == CIF_CSI_FRAME0_READY)
 				stream->curr_buf = NULL;
-			if (dummy_buf->vaddr && stream->frame_phase == CIF_CSI_FRAME1_READY)
+			if (dummy_buf->is_allocated && stream->frame_phase == CIF_CSI_FRAME1_READY)
 				stream->next_buf = NULL;
 			buffer = NULL;
 		}
@@ -1889,7 +1936,7 @@ static int rkcif_assign_new_buffer_oneframe(struct rkcif_stream *stream,
 			rkcif_write_register(dev, frm_addr_uv,
 					     buffer->buff_addr[RKCIF_PLANE_CBCR]);
 		} else {
-			if (dummy_buf->vaddr) {
+			if (dummy_buf->is_allocated) {
 				rkcif_write_register(dev, frm_addr_y,
 					     dummy_buf->dma_addr);
 				rkcif_write_register(dev, frm_addr_uv,
@@ -1941,16 +1988,53 @@ static void rkcif_rx_buffer_free(struct rkcif_stream *stream)
 	}
 }
 
+static inline void rkcif_dump_rx_buf_state(struct rkcif_stream *stream,
+					   struct rkcif_rx_buffer *rx_buf,
+					   const char *tag)
+{
+	struct rkcif_device *dev = stream->cifdev;
+	bool on_list = rx_buf->in_rx_list;
+
+	v4l2_warn(&dev->v4l2_dev,
+		  "%s: s[%d] buf=%p dma=0x%x in_isp=%d use_cnt=%d on_list=%d curr=%d next=%d rdbk[L/M/S]=%d/%d/%d\n",
+		  tag, stream->id, rx_buf, (u32)rx_buf->dummy.dma_addr,
+		  rx_buf->in_isp, rx_buf->use_cnt, on_list,
+		  stream->curr_buf_toisp == rx_buf,
+		  stream->next_buf_toisp == rx_buf,
+		  dev->rdbk_rx_buf[RDBK_L] == rx_buf,
+		  dev->rdbk_rx_buf[RDBK_M] == rx_buf,
+		  dev->rdbk_rx_buf[RDBK_S] == rx_buf);
+}
+
 static void rkcif_s_rx_buffer(struct rkcif_stream *stream, struct rkisp_rx_buf *dbufs)
 {
 	struct rkcif_device *dev = stream->cifdev;
 	struct v4l2_subdev *sd;
 	struct rkcif_rx_buffer *rx_buf = NULL;
+	int ret;
 
 	sd = get_rkisp_sd(dev->sditf[0]);
 	if (!sd)
 		return;
 	rx_buf = to_cif_rx_buf(dbufs);
+	if (unlikely(rx_buf->in_rx_list)) {
+		v4l2_warn(&dev->v4l2_dev,
+			  "stream[%d] send rx buf while on list, dma=0x%x seq=%u curr=%d next=%d rdbk[L/M/S]=%d/%d/%d\n",
+			  stream->id, (u32)rx_buf->dummy.dma_addr, dbufs->sequence,
+			  stream->curr_buf_toisp == rx_buf,
+			  stream->next_buf_toisp == rx_buf,
+			  dev->rdbk_rx_buf[RDBK_L] == rx_buf,
+			  dev->rdbk_rx_buf[RDBK_M] == rx_buf,
+			  dev->rdbk_rx_buf[RDBK_S] == rx_buf);
+	}
+	if (unlikely(rx_buf->in_isp)) {
+		v4l2_warn(&dev->v4l2_dev,
+			  "stream[%d] skip duplicate s_rx_buffer, dma=0x%x seq=%u\n",
+			  stream->id, (u32)rx_buf->dummy.dma_addr, dbufs->sequence);
+		rkcif_dump_rx_buf_state(stream, rx_buf, "dup_s_rx");
+		return;
+	}
+	rx_buf->in_isp = true;
 	stream->last_buf_toisp = rx_buf;
 	if (dev->switch_info.is_use_switch) {
 		if (!rx_buf->is_init[dev->csi_host_idx_def]) {
@@ -1965,7 +2049,13 @@ static void rkcif_s_rx_buffer(struct rkcif_stream *stream, struct rkisp_rx_buf *
 			  "s_buf seq %d type %d, dma addr %x, %lld\n",
 			  dbufs->sequence, dbufs->type, (u32)rx_buf->dummy.dma_addr,
 			  rkcif_time_get_ns(dev));
-	v4l2_subdev_call(sd, video, s_rx_buffer, dbufs, NULL);
+	ret = v4l2_subdev_call(sd, video, s_rx_buffer, dbufs, NULL);
+	if (ret < 0) {
+		rx_buf->in_isp = false;
+		v4l2_warn(&dev->v4l2_dev,
+			  "stream[%d] s_rx_buffer failed %d, dma=0x%x\n",
+			  stream->id, ret, (u32)rx_buf->dummy.dma_addr);
+	}
 }
 
 static void rkcif_enable_skip_frame_rv1126b(struct rkcif_stream *stream, int cap_m, int skip_n)
@@ -2029,12 +2119,163 @@ static void rkcif_rdbk_with_tools(struct rkcif_stream *stream,
 	if (stream->tools_vdev->state == RKCIF_STATE_STREAMING &&
 	    active_buf &&
 	    !stream->tools_vdev->is_cap_scale) {
+		/* Log real prior use_cnt; we set it to 2 for ISP+tools sharing next. */
+		int old_use_cnt = active_buf->use_cnt;
+
 		list_add_tail(&active_buf->list_tool, &stream->tools_vdev->buf_done_head);
 		active_buf->use_cnt = 2;
+		v4l2_dbg(5, rkcif_debug, &stream->cifdev->v4l2_dev,
+			 "rdbk_with_tools: buf 0x%x set use_cnt=2, old=%d\n",
+			 (u32)active_buf->dummy.dma_addr, old_use_cnt);
 		if (!work_busy(&stream->tools_vdev->work))
 			schedule_work(&stream->tools_vdev->work);
 	}
 	spin_unlock_irqrestore(&stream->tools_vdev->vbq_lock, flags);
+}
+
+static inline void rkcif_count_loss_fe_no_out(struct rkcif_stream *stream,
+					      int count)
+{
+	struct sditf_priv *priv = READ_ONCE(stream->cifdev->sditf[0]);
+
+	/* In online pass-through modes, FE->app-done mismatch is not meaningful. */
+	/* enum rkisp_vicap_link keeps ONLINE* before RKISP_VICAP_RDBK_AIQ. */
+	if (priv && priv->mode.rdbk_mode < RKISP_VICAP_RDBK_AIQ)
+		return;
+
+	stream->frame_loss_fe_no_out += count;
+
+	if (rkcif_debug > 4) {
+		u64 total = stream->frame_loss_fs_no_fe + stream->frame_loss_fe_no_out;
+
+		if ((total & 0x3f) == 0)
+			v4l2_dbg(5, rkcif_debug, &stream->cifdev->v4l2_dev,
+				 "stream[%d] loss stat: fs_no_fe=%llu fe_no_out=%llu total=%llu\n",
+				 stream->id, stream->frame_loss_fs_no_fe,
+				 stream->frame_loss_fe_no_out, total);
+	}
+}
+
+static inline void rkcif_count_loss_fs_no_fe(struct rkcif_stream *stream,
+					     int count)
+{
+	stream->frame_loss_fs_no_fe += count;
+
+	if (rkcif_debug > 4) {
+		u64 total = stream->frame_loss_fs_no_fe + stream->frame_loss_fe_no_out;
+
+		if ((total & 0x3f) == 0)
+			v4l2_dbg(5, rkcif_debug, &stream->cifdev->v4l2_dev,
+				 "stream[%d] loss stat: fs_no_fe=%llu fe_no_out=%llu total=%llu\n",
+				 stream->id, stream->frame_loss_fs_no_fe,
+				 stream->frame_loss_fe_no_out, total);
+	}
+}
+
+static inline bool rkcif_should_count_no_app_loss(struct rkcif_stream *stream)
+{
+	struct rkcif_device *cif_dev = stream->cifdev;
+
+	/*
+	 * If HDR matching has not started yet, buffers can be recycled without
+	 * app output. That is a real no-app loss and must be counted.
+	 */
+	if (!READ_ONCE(cif_dev->is_start_hdr))
+		return true;
+
+	/*
+	 * In HDR readback paths, "no app done" can be transient while waiting
+	 * for cross-VC match. Count loss only when not in that window.
+	 */
+	if (cif_dev->hdr.hdr_mode == NO_HDR ||
+	    cif_dev->hdr.hdr_mode == HDR_CIS_MERGE)
+		return true;
+	if (cif_dev->hdr.hdr_mode == HDR_X2)
+		return stream->id >= RKCIF_STREAM_MIPI_ID2;
+	if (cif_dev->hdr.hdr_mode == HDR_X3)
+		return stream->id >= RKCIF_STREAM_MIPI_ID3;
+
+	return false;
+}
+
+static inline void rkcif_count_sof_unpaired_loss(struct rkcif_stream *stream)
+{
+	struct rkcif_device *cif_dev = stream->cifdev;
+	struct sditf_priv *priv = stream->cifdev->sditf[0];
+	bool toisp_online = false;
+
+	if (priv)
+		/* enum rkisp_vicap_link keeps ONLINE* before RKISP_VICAP_RDBK_AIQ. */
+		toisp_online = priv->mode.rdbk_mode < RKISP_VICAP_RDBK_AIQ;
+
+	/*
+	 * HDR readback: suppress fs_no_fe while this VC's DMA capture is active,
+	 * because FS/FE pairing is cross-VC and transient gaps are expected.
+	 * When DMA is off, FS may still arrive without FE — that is real loss.
+	 */
+	if (toisp_online &&
+	    ((cif_dev->hdr.hdr_mode == HDR_X2 &&
+	      stream->id == RKCIF_STREAM_MIPI_ID1) ||
+	     (cif_dev->hdr.hdr_mode == HDR_X3 &&
+	      stream->id == RKCIF_STREAM_MIPI_ID2) ||
+	     ((cif_dev->hdr.hdr_mode == NO_HDR ||
+	       cif_dev->hdr.hdr_mode == HDR_CIS_MERGE) &&
+	      stream->id == RKCIF_STREAM_MIPI_ID0)))
+		return;
+
+	if (stream->fs_cnt_in_single_frame > 0) {
+		rkcif_count_loss_fs_no_fe(stream, 1);
+		v4l2_dbg(5, rkcif_debug, &stream->cifdev->v4l2_dev,
+			 "stream[%d] fs_no_fe +1 on SOF: fs_cnt=%u fs_no_fe=%llu fe_no_out=%llu total=%llu\n",
+			 stream->id, stream->fs_cnt_in_single_frame,
+			 stream->frame_loss_fs_no_fe,
+			 stream->frame_loss_fe_no_out,
+			 stream->frame_loss_fs_no_fe +
+			 stream->frame_loss_fe_no_out);
+	}
+	stream->fs_cnt_in_single_frame++;
+}
+
+static inline void rkcif_requeue_rx_buf_toisp(struct rkcif_stream *stream,
+					      struct rkcif_rx_buffer *rx_buf)
+{
+	unsigned long flags;
+
+	if (!rx_buf)
+		return;
+
+	spin_lock_irqsave(&stream->vbq_lock, flags);
+	if (!rx_buf->in_rx_list) {
+		rx_buf->in_isp = false;
+		list_add_tail(&rx_buf->list, &stream->rx_buf_head);
+		rx_buf->in_rx_list = true;
+	} else {
+		v4l2_warn(&stream->cifdev->v4l2_dev,
+			  "stream[%d] skip duplicate rx buf enqueue, dma=0x%x\n",
+			  stream->id, (u32)rx_buf->dummy.dma_addr);
+		rkcif_dump_rx_buf_state(stream, rx_buf, "dup_requeue");
+	}
+	spin_unlock_irqrestore(&stream->vbq_lock, flags);
+}
+
+static inline void rkcif_requeue_rx_buf_toisp_locked(struct rkcif_stream *stream,
+						     struct rkcif_rx_buffer *rx_buf)
+{
+	if (!rx_buf)
+		return;
+
+	lockdep_assert_held(&stream->vbq_lock);
+	if (!rx_buf->in_rx_list) {
+		rx_buf->in_isp = false;
+		list_add_tail(&rx_buf->list, &stream->rx_buf_head);
+		rx_buf->in_rx_list = true;
+		rkcif_assign_check_buffer_update_toisp(stream);
+	} else {
+		v4l2_warn(&stream->cifdev->v4l2_dev,
+			  "stream[%d] skip duplicate rx buf enqueue(locked), dma=0x%x\n",
+			  stream->id, (u32)rx_buf->dummy.dma_addr);
+		rkcif_dump_rx_buf_state(stream, rx_buf, "dup_requeue_locked");
+	}
 }
 
 static void rkcif_rdbk_frame_end_toisp(struct rkcif_stream *stream,
@@ -2042,14 +2283,24 @@ static void rkcif_rdbk_frame_end_toisp(struct rkcif_stream *stream,
 {
 	struct rkcif_device *dev = stream->cifdev;
 	struct rkcif_sensor_info *sensor = &stream->cifdev->terminal_sensor;
+	struct rkcif_rx_buffer *pending[RDBK_MAX] = { NULL };
 	u32 denominator, numerator;
 	u64 l_ts, m_ts, s_ts, time = 30000000LL;
 	int ret, fps = -1;
+	int i;
 	unsigned long flags;
 
 	spin_lock_irqsave(&dev->hdr_lock, flags);
-	if (dev->rdbk_rx_buf[stream->id]) {
-		list_add_tail(&dev->rdbk_rx_buf[stream->id]->list, &stream->rx_buf_head);
+	v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "_%d_ stream[%d] add 0x%x frame end\n",
+		 __LINE__, stream->id, (u32)buffer->dummy.dma_addr);
+	if (dev->rdbk_rx_buf[stream->id] && dev->rdbk_rx_buf[stream->id] != buffer) {
+		/* Replaced before HDR assembly: count as FE without output. */
+		rkcif_count_loss_fe_no_out(&dev->stream[stream->id], 1);
+		rkcif_requeue_rx_buf_toisp_locked(stream, dev->rdbk_rx_buf[stream->id]);
+		v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+			 "stream[%d] old buf %p, addr 0x%x to list, new buf %p, addr 0x%x\n",
+			 stream->id, dev->rdbk_rx_buf[stream->id], (u32)dev->rdbk_rx_buf[stream->id]->dummy.dma_addr,
+			 buffer, (u32)buffer->dummy.dma_addr);
 		dev->rdbk_rx_buf[stream->id] = buffer;
 	} else {
 		dev->rdbk_rx_buf[stream->id] = buffer;
@@ -2064,9 +2315,9 @@ static void rkcif_rdbk_frame_end_toisp(struct rkcif_stream *stream,
 	    dev->rdbk_rx_buf[RDBK_L] &&
 	    dev->rdbk_rx_buf[RDBK_M] &&
 	    dev->rdbk_rx_buf[RDBK_S]) {
-		l_ts = dev->rdbk_rx_buf[RDBK_L]->fe_timestamp;
-		m_ts = dev->rdbk_rx_buf[RDBK_M]->fe_timestamp;
-		s_ts = dev->rdbk_rx_buf[RDBK_S]->fe_timestamp;
+		l_ts = dev->rdbk_rx_buf[RDBK_L]->dbufs.timestamp;
+		m_ts = dev->rdbk_rx_buf[RDBK_M]->dbufs.timestamp;
+		s_ts = dev->rdbk_rx_buf[RDBK_S]->dbufs.timestamp;
 
 		if (m_ts < l_ts || s_ts < m_ts) {
 			v4l2_err(&dev->v4l2_dev,
@@ -2098,12 +2349,15 @@ static void rkcif_rdbk_frame_end_toisp(struct rkcif_stream *stream,
 		}
 		dev->rdbk_rx_buf[RDBK_M]->dbufs.sequence = dev->rdbk_rx_buf[RDBK_L]->dbufs.sequence;
 		dev->rdbk_rx_buf[RDBK_S]->dbufs.sequence = dev->rdbk_rx_buf[RDBK_L]->dbufs.sequence;
-		rkcif_s_rx_buffer(&dev->stream[RDBK_L], &dev->rdbk_rx_buf[RDBK_L]->dbufs);
-		rkcif_s_rx_buffer(&dev->stream[RDBK_M], &dev->rdbk_rx_buf[RDBK_M]->dbufs);
-		rkcif_s_rx_buffer(&dev->stream[RDBK_S], &dev->rdbk_rx_buf[RDBK_S]->dbufs);
 		rkcif_rdbk_with_tools(&dev->stream[RDBK_L], dev->rdbk_rx_buf[RDBK_L]);
 		rkcif_rdbk_with_tools(&dev->stream[RDBK_M], dev->rdbk_rx_buf[RDBK_M]);
 		rkcif_rdbk_with_tools(&dev->stream[RDBK_S], dev->rdbk_rx_buf[RDBK_S]);
+		rkcif_s_rx_buffer(&dev->stream[RDBK_L], &dev->rdbk_rx_buf[RDBK_L]->dbufs);
+		rkcif_s_rx_buffer(&dev->stream[RDBK_M], &dev->rdbk_rx_buf[RDBK_M]->dbufs);
+		rkcif_s_rx_buffer(&dev->stream[RDBK_S], &dev->rdbk_rx_buf[RDBK_S]->dbufs);
+		dev->stream[RDBK_L].frame_out_cnt++;
+		dev->stream[RDBK_M].frame_out_cnt++;
+		dev->stream[RDBK_S].frame_out_cnt++;
 		atomic_dec(&dev->stream[RDBK_L].buf_cnt);
 		atomic_dec(&dev->stream[RDBK_M].buf_cnt);
 		atomic_dec(&dev->stream[RDBK_S].buf_cnt);
@@ -2112,14 +2366,22 @@ static void rkcif_rdbk_frame_end_toisp(struct rkcif_stream *stream,
 		dev->rdbk_rx_buf[RDBK_S] = NULL;
 	} else if (dev->hdr.hdr_mode == HDR_X2 &&
 		dev->rdbk_rx_buf[RDBK_L] && dev->rdbk_rx_buf[RDBK_M]) {
-		l_ts = dev->rdbk_rx_buf[RDBK_L]->fe_timestamp;
-		s_ts = dev->rdbk_rx_buf[RDBK_M]->fe_timestamp;
+		l_ts = dev->rdbk_rx_buf[RDBK_L]->dbufs.timestamp;
+		s_ts = dev->rdbk_rx_buf[RDBK_M]->dbufs.timestamp;
 
 		if (s_ts < l_ts) {
 			v4l2_err(&dev->v4l2_dev,
-				 "s/l frame err, timestamp s:%lld l:%lld\n",
+				 "s/l frame err(stale short), timestamp s:%lld l:%lld\n",
 				 s_ts, l_ts);
-			goto RDBK_TOISP_UNMATCH;
+			/* Keep current long frame, drop stale short and wait next short. */
+			rkcif_count_loss_fe_no_out(&dev->stream[RKCIF_STREAM_MIPI_ID1], 1);
+			if (&dev->stream[RDBK_M] == stream)
+				rkcif_requeue_rx_buf_toisp_locked(&dev->stream[RDBK_M],
+								  dev->rdbk_rx_buf[RDBK_M]);
+			else
+				pending[RDBK_M] = dev->rdbk_rx_buf[RDBK_M];
+			dev->rdbk_rx_buf[RDBK_M] = NULL;
+			goto RDBK_TOISP_OUT;
 		}
 
 		if ((s_ts - l_ts) > time) {
@@ -2137,27 +2399,144 @@ static void rkcif_rdbk_frame_end_toisp(struct rkcif_stream *stream,
 			}
 			if ((s_ts - l_ts) > time) {
 				v4l2_err(&dev->v4l2_dev,
-					 "timestamp no match, s:%lld l:%lld, fps:%d\n",
+					 "timestamp no match(stale long), s:%lld l:%lld, fps:%d\n",
 					 s_ts, l_ts, fps);
-				goto RDBK_TOISP_UNMATCH;
+				/* Keep current short frame, drop stale long and wait next long. */
+				rkcif_count_loss_fe_no_out(&dev->stream[RKCIF_STREAM_MIPI_ID0], 1);
+				if (&dev->stream[RDBK_L] == stream)
+					rkcif_requeue_rx_buf_toisp_locked(&dev->stream[RDBK_L],
+									  dev->rdbk_rx_buf[RDBK_L]);
+				else
+					pending[RDBK_L] = dev->rdbk_rx_buf[RDBK_L];
+				dev->rdbk_rx_buf[RDBK_L] = NULL;
+				goto RDBK_TOISP_OUT;
 			}
 		}
 		dev->rdbk_rx_buf[RDBK_M]->dbufs.sequence = dev->rdbk_rx_buf[RDBK_L]->dbufs.sequence;
-		rkcif_s_rx_buffer(&dev->stream[RDBK_L], &dev->rdbk_rx_buf[RDBK_L]->dbufs);
-		rkcif_s_rx_buffer(&dev->stream[RDBK_M], &dev->rdbk_rx_buf[RDBK_M]->dbufs);
 		rkcif_rdbk_with_tools(&dev->stream[RDBK_L], dev->rdbk_rx_buf[RDBK_L]);
 		rkcif_rdbk_with_tools(&dev->stream[RDBK_M], dev->rdbk_rx_buf[RDBK_M]);
+		rkcif_s_rx_buffer(&dev->stream[RDBK_L], &dev->rdbk_rx_buf[RDBK_L]->dbufs);
+		rkcif_s_rx_buffer(&dev->stream[RDBK_M], &dev->rdbk_rx_buf[RDBK_M]->dbufs);
+		dev->stream[RDBK_L].frame_out_cnt++;
+		dev->stream[RDBK_M].frame_out_cnt++;
+		v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+			 "L buf %p, addr 0x%x, S buf %p, addr 0x%x\n",
+			 dev->rdbk_rx_buf[RDBK_L], (u32)dev->rdbk_rx_buf[RDBK_L]->dummy.dma_addr,
+			 dev->rdbk_rx_buf[RDBK_M], (u32)dev->rdbk_rx_buf[RDBK_M]->dummy.dma_addr);
 		atomic_dec(&dev->stream[RDBK_L].buf_cnt);
 		atomic_dec(&dev->stream[RDBK_M].buf_cnt);
 		dev->rdbk_rx_buf[RDBK_L] = NULL;
 		dev->rdbk_rx_buf[RDBK_M] = NULL;
+	} else if (dev->hdr.hdr_mode == HDR_X3) {
+		u64 now = rkcif_time_get_ns(dev);
+		int partial_cnt = 0;
+		u64 oldest_ts = 0;
+		u64 stale_age = 0;
+		bool timeout = false;
+
+		for (i = 0; i < RDBK_MAX; i++) {
+			struct rkcif_rx_buffer *rx = dev->rdbk_rx_buf[i];
+
+			if (!rx)
+				continue;
+			if (!partial_cnt || rx->fe_timestamp < oldest_ts)
+				oldest_ts = rx->fe_timestamp;
+			partial_cnt++;
+		}
+
+		if (partial_cnt > 0 && partial_cnt < RDBK_MAX)
+			stale_age = now - oldest_ts;
+
+		if (partial_cnt > 0 && partial_cnt < RDBK_MAX && stale_age > time)
+			timeout = true;
+
+		if (timeout) {
+			v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+				 "HDR_X3 toisp pair timeout: L=%d M=%d S=%d age=%llu(ns)\n",
+				 !!dev->rdbk_rx_buf[RDBK_L], !!dev->rdbk_rx_buf[RDBK_M],
+				 !!dev->rdbk_rx_buf[RDBK_S], stale_age);
+			for (i = 0; i < RDBK_MAX; i++) {
+				if (dev->rdbk_rx_buf[i]) {
+					rkcif_count_loss_fe_no_out(&dev->stream[i], 1);
+					if (&dev->stream[i] == stream)
+						rkcif_requeue_rx_buf_toisp_locked(&dev->stream[i],
+										  dev->rdbk_rx_buf[i]);
+					else
+						pending[i] = dev->rdbk_rx_buf[i];
+					dev->rdbk_rx_buf[i] = NULL;
+				}
+			}
+		} else {
+			v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+				 "HDR_X3 toisp wait pair: L=%d M=%d S=%d\n",
+				 !!dev->rdbk_rx_buf[RDBK_L], !!dev->rdbk_rx_buf[RDBK_M],
+				 !!dev->rdbk_rx_buf[RDBK_S]);
+		}
+	} else if (dev->hdr.hdr_mode == HDR_X2) {
+		u64 now = rkcif_time_get_ns(dev);
+		struct rkcif_rx_buffer *stale_rx = NULL;
+		u64 stale_age = 0;
+		bool timeout = false;
+
+		if (dev->rdbk_rx_buf[RDBK_L] && !dev->rdbk_rx_buf[RDBK_M]) {
+			stale_rx = dev->rdbk_rx_buf[RDBK_L];
+			stale_age = now - stale_rx->fe_timestamp;
+		} else if (!dev->rdbk_rx_buf[RDBK_L] && dev->rdbk_rx_buf[RDBK_M]) {
+			stale_rx = dev->rdbk_rx_buf[RDBK_M];
+			stale_age = now - stale_rx->fe_timestamp;
+		}
+
+		if (stale_rx && stale_age > time)
+			timeout = true;
+
+		if (timeout) {
+			v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+				 "HDR_X2 toisp pair timeout: L=%d M=%d age=%llu(ns)\n",
+				 !!dev->rdbk_rx_buf[RDBK_L], !!dev->rdbk_rx_buf[RDBK_M],
+				 stale_age);
+			for (i = 0; i < RDBK_MAX; i++) {
+				if (dev->rdbk_rx_buf[i]) {
+					rkcif_count_loss_fe_no_out(&dev->stream[i], 1);
+					if (&dev->stream[i] == stream)
+						rkcif_requeue_rx_buf_toisp_locked(&dev->stream[i],
+										  dev->rdbk_rx_buf[i]);
+					else
+						pending[i] = dev->rdbk_rx_buf[i];
+					dev->rdbk_rx_buf[i] = NULL;
+				}
+			}
+		} else {
+			v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+				 "HDR_X2 toisp wait pair: L=%d M=%d age=%llu(ns)\n",
+				 !!dev->rdbk_rx_buf[RDBK_L], !!dev->rdbk_rx_buf[RDBK_M],
+				 stale_age);
+		}
 	}
 
 	spin_unlock_irqrestore(&dev->hdr_lock, flags);
-	return;
+	goto RDBK_TOISP_REQUEUE_PENDING;
 
 RDBK_TOISP_UNMATCH:
+	for (i = 0; i < RDBK_MAX; i++) {
+		if (dev->rdbk_rx_buf[i]) {
+			rkcif_count_loss_fe_no_out(&dev->stream[i], 1);
+			if (&dev->stream[i] == stream)
+				rkcif_requeue_rx_buf_toisp_locked(&dev->stream[i],
+								  dev->rdbk_rx_buf[i]);
+			else
+				pending[i] = dev->rdbk_rx_buf[i];
+			dev->rdbk_rx_buf[i] = NULL;
+		}
+	}
+
+RDBK_TOISP_OUT:
 	spin_unlock_irqrestore(&dev->hdr_lock, flags);
+RDBK_TOISP_REQUEUE_PENDING:
+	for (i = 0; i < RDBK_MAX; i++) {
+		if (!pending[i])
+			continue;
+		rkcif_requeue_rx_buf_toisp(&dev->stream[i], pending[i]);
+	}
 }
 
 static void rkcif_get_other_dev_update_frame_addr(struct rkcif_stream *stream,
@@ -2282,7 +2661,11 @@ static void rkcif_assign_new_buffer_init_toisp(struct rkcif_stream *stream,
 						 struct rkcif_rx_buffer,
 						 list);
 			if (rx_buf) {
+				v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "_%d_ stream[%d] del 0x%x from list %p\n",
+					 __LINE__, stream->id, (u32)rx_buf->dummy.dma_addr, &stream->rx_buf_head);
 				list_del(&rx_buf->list);
+				rx_buf->in_rx_list = false;
+				rx_buf->in_isp = false;
 				buf_stream->curr_buf_toisp = rx_buf;
 			}
 		}
@@ -2302,7 +2685,7 @@ static void rkcif_assign_new_buffer_init_toisp(struct rkcif_stream *stream,
 			v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "%s %d, stream[%d] lack buf %d\n",
 				 __func__, __LINE__, buf_stream->id, buf_stream->lack_buf_cnt);
 		}
-		 buf_stream->toisp_buf_state.state = RKCIF_TOISP_BUF_LOSS;
+		 buf_stream->buf_state.state = RKCIF_BUF_LOSS;
 	}
 
 	if (!buf_stream->next_buf_toisp) {
@@ -2310,14 +2693,18 @@ static void rkcif_assign_new_buffer_init_toisp(struct rkcif_stream *stream,
 			rx_buf = list_first_entry(&buf_stream->rx_buf_head,
 						 struct rkcif_rx_buffer, list);
 			if (rx_buf) {
+				v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "_%d_ stream[%d] del 0x%x from list %p\n",
+					 __LINE__, stream->id, (u32)rx_buf->dummy.dma_addr, &stream->rx_buf_head);
 				list_del(&rx_buf->list);
+				rx_buf->in_rx_list = false;
+				rx_buf->in_isp = false;
 				buf_stream->next_buf_toisp = rx_buf;
 			} else {
 				buf_stream->next_buf_toisp = buf_stream->curr_buf_toisp;
 			}
 		} else if (buf_stream->curr_buf_toisp) {
 			buf_stream->next_buf_toisp = buf_stream->curr_buf_toisp;
-			buf_stream->toisp_buf_state.state = RKCIF_TOISP_BUF_THESAME;
+			buf_stream->buf_state.state = RKCIF_BUF_THESAME;
 			if (buf_stream->lack_buf_cnt < 2) {
 				buf_stream->lack_buf_cnt++;
 				v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "%s %d, stream[%d] lack buf %d\n",
@@ -2438,20 +2825,24 @@ static int rkcif_assign_new_buffer_update_toisp(struct rkcif_stream *stream,
 	spin_lock_irqsave(&stream->vbq_lock, flags);
 	if (stream->cur_skip_frame)
 		goto out_get_buf;
-	memset(&buf_stream->toisp_buf_state, 0, sizeof(stream->toisp_buf_state));
+	memset(&buf_stream->buf_state, 0, sizeof(buf_stream->buf_state));
 	if (!list_empty(&buf_stream->rx_buf_head)) {
 		if (buf_stream->curr_buf_toisp && buf_stream->next_buf_toisp &&
 		    buf_stream->curr_buf_toisp != buf_stream->next_buf_toisp)
-			buf_stream->toisp_buf_state.state = RKCIF_TOISP_BUF_ROTATE;
+			buf_stream->buf_state.state = RKCIF_BUF_ROTATE;
 		else
-			buf_stream->toisp_buf_state.state = RKCIF_TOISP_BUF_LOSS;
+			buf_stream->buf_state.state = RKCIF_BUF_LOSS;
 		if (stream->frame_phase == CIF_CSI_FRAME0_READY) {
 			active_buf = buf_stream->curr_buf_toisp;
 
 			buffer = list_first_entry(&buf_stream->rx_buf_head,
 						 struct rkcif_rx_buffer, list);
 			if (buffer) {
+				v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "_%d_ stream[%d] del 0x%x from list %p\n",
+					 __LINE__, stream->id, (u32)buffer->dummy.dma_addr, &stream->rx_buf_head);
 				list_del(&buffer->list);
+				buffer->in_rx_list = false;
+				buffer->in_isp = false;
 				buf_stream->curr_buf_toisp = buffer;
 			}
 			if (priv && (priv->mode.rdbk_mode == RKISP_VICAP_RDBK_AUTO ||
@@ -2472,25 +2863,32 @@ static int rkcif_assign_new_buffer_update_toisp(struct rkcif_stream *stream,
 				active_buf->fe_timestamp = rkcif_time_get_ns(dev);
 				stream->last_frame_idx = stream->frame_idx;
 				if (dev->hdr.hdr_mode == NO_HDR) {
-					rkcif_s_rx_buffer(stream, &active_buf->dbufs);
 					if (dev->is_support_tools && stream->tools_vdev)
 						rkcif_rdbk_with_tools(stream, active_buf);
+					rkcif_s_rx_buffer(stream, &active_buf->dbufs);
+					stream->frame_out_cnt++;
 					atomic_dec(&stream->buf_cnt);
 				} else {
 					rkcif_rdbk_frame_end_toisp(stream, active_buf);
 				}
 			} else {
-				if (active_buf)
-					rkcif_s_rx_buffer(stream, &active_buf->dbufs);
 				if (dev->is_support_tools && stream->tools_vdev)
 					rkcif_rdbk_with_tools(stream, active_buf);
+				if (active_buf) {
+					rkcif_s_rx_buffer(stream, &active_buf->dbufs);
+					stream->frame_out_cnt++;
+				}
 			}
 		} else if (stream->frame_phase == CIF_CSI_FRAME1_READY) {
 			active_buf = buf_stream->next_buf_toisp;
 			buffer = list_first_entry(&buf_stream->rx_buf_head,
 						 struct rkcif_rx_buffer, list);
 			if (buffer) {
+				v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "_%d_ stream[%d] del 0x%x from list %p\n",
+					 __LINE__, stream->id, (u32)buffer->dummy.dma_addr, &stream->rx_buf_head);
 				list_del(&buffer->list);
+				buffer->in_rx_list = false;
+				buffer->in_isp = false;
 				buf_stream->next_buf_toisp = buffer;
 			}
 			if (priv && (priv->mode.rdbk_mode == RKISP_VICAP_RDBK_AUTO ||
@@ -2511,18 +2909,21 @@ static int rkcif_assign_new_buffer_update_toisp(struct rkcif_stream *stream,
 				active_buf->fe_timestamp = rkcif_time_get_ns(dev);
 				stream->last_frame_idx = stream->frame_idx;
 				if (dev->hdr.hdr_mode == NO_HDR) {
-					rkcif_s_rx_buffer(stream, &active_buf->dbufs);
 					if (dev->is_support_tools && stream->tools_vdev)
 						rkcif_rdbk_with_tools(stream, active_buf);
+					rkcif_s_rx_buffer(stream, &active_buf->dbufs);
+					stream->frame_out_cnt++;
 					atomic_dec(&stream->buf_cnt);
 				} else {
 					rkcif_rdbk_frame_end_toisp(stream, active_buf);
 				}
 			} else {
-				if (active_buf)
-					rkcif_s_rx_buffer(stream, &active_buf->dbufs);
 				if (dev->is_support_tools && stream->tools_vdev)
 					rkcif_rdbk_with_tools(stream, active_buf);
+				if (active_buf) {
+					rkcif_s_rx_buffer(stream, &active_buf->dbufs);
+					stream->frame_out_cnt++;
+				}
 			}
 		}
 		if (buf_stream->lack_buf_cnt) {
@@ -2538,13 +2939,7 @@ static int rkcif_assign_new_buffer_update_toisp(struct rkcif_stream *stream,
 			v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "%s %d, stream[%d] lack buf %d\n",
 				 __func__, __LINE__, buf_stream->id, buf_stream->lack_buf_cnt);
 		}
-		if (dev->hw_dev->dummy_buf.vaddr) {
-			if (stream->frame_phase == CIF_CSI_FRAME0_READY) {
-				active_buf = buf_stream->curr_buf_toisp;
-			} else {
-				active_buf = buf_stream->next_buf_toisp;
-			}
-		} else if (buf_stream->curr_buf_toisp && buf_stream->next_buf_toisp &&
+		if (buf_stream->curr_buf_toisp && buf_stream->next_buf_toisp &&
 			   buf_stream->curr_buf_toisp != buf_stream->next_buf_toisp) {
 			if (stream->frame_phase == CIF_CSI_FRAME0_READY) {
 				active_buf = buf_stream->curr_buf_toisp;
@@ -2555,14 +2950,14 @@ static int rkcif_assign_new_buffer_update_toisp(struct rkcif_stream *stream,
 				buf_stream->next_buf_toisp = buf_stream->curr_buf_toisp;
 				buffer = buf_stream->curr_buf_toisp;
 			}
-			buf_stream->toisp_buf_state.state = RKCIF_TOISP_BUF_THESAME;
+			buf_stream->buf_state.state = RKCIF_BUF_THESAME;
 			if (stream->cifdev->rdbk_debug)
 				v4l2_info(&stream->cifdev->v4l2_dev,
 					  "stream[%d] hold buf %x\n",
 					  stream->id,
 					  (u32)buf_stream->next_buf_toisp->dummy.dma_addr);
 		} else {
-			buf_stream->toisp_buf_state.state = RKCIF_TOISP_BUF_LOSS;
+			buf_stream->buf_state.state = RKCIF_BUF_LOSS;
 
 			active_buf = buf_stream->curr_buf_toisp;
 			buf_stream->curr_buf_toisp = NULL;
@@ -2585,20 +2980,21 @@ static int rkcif_assign_new_buffer_update_toisp(struct rkcif_stream *stream,
 			active_buf->fe_timestamp = rkcif_time_get_ns(dev);
 			stream->last_frame_idx = stream->frame_idx;
 			if (dev->hdr.hdr_mode == NO_HDR) {
+				if (dev->is_support_tools && stream->tools_vdev)
+					rkcif_rdbk_with_tools(stream, active_buf);
 				rkcif_s_rx_buffer(stream, &active_buf->dbufs);
+				stream->frame_out_cnt++;
 				atomic_dec(&stream->buf_cnt);
 			} else {
 				rkcif_rdbk_frame_end_toisp(stream, active_buf);
 			}
 		} else {
-			if (stream->cifdev->rdbk_debug && dev->hw_dev->dummy_buf.vaddr)
+			if (stream->cifdev->rdbk_debug && dev->hw_dev->dummy_buf.is_allocated)
 				v4l2_info(&stream->cifdev->v4l2_dev,
 					  "stream[%d] loss frame %d\n",
 					  stream->id,
 					  stream->frame_idx - 1);
 		}
-		if (dev->is_support_tools && stream->tools_vdev && active_buf)
-			rkcif_rdbk_with_tools(stream, active_buf);
 	}
 out_get_buf:
 	buf_stream->frame_phase_cache = stream->frame_phase;
@@ -2618,7 +3014,7 @@ out_get_buf:
 				  stream->id,
 				  stream->frame_idx - 1,
 				  frm_addr_y, (u32)buffer->dummy.dma_addr);
-	} else if (dev->hw_dev->dummy_buf.vaddr && priv &&
+	} else if (dev->hw_dev->dummy_buf.is_allocated && priv &&
 		   priv->mode.rdbk_mode == RKISP_VICAP_RDBK_AUTO) {
 		buff_addr_y = dev->hw_dev->dummy_buf.dma_addr;
 		if (capture_info->mode == RKMODULE_MULTI_DEV_COMBINE_ONE) {
@@ -2691,11 +3087,11 @@ void rkcif_assign_check_buffer_update_toisp(struct rkcif_stream *stream)
 	    dev->switch_info.switch_dev->switch_info.is_init_buf)
 		buf_stream = &dev->switch_info.switch_dev->stream[stream->id];
 
-	if (buf_stream->toisp_buf_state.state == RKCIF_TOISP_BUF_ROTATE ||
-	    (buf_stream->toisp_buf_state.state == RKCIF_TOISP_BUF_THESAME &&
-	     buf_stream->toisp_buf_state.check_cnt >= 1) ||
-	    (buf_stream->toisp_buf_state.state == RKCIF_TOISP_BUF_LOSS &&
-	     buf_stream->toisp_buf_state.check_cnt >= 2)) {
+	if (buf_stream->buf_state.state == RKCIF_BUF_ROTATE ||
+	    (buf_stream->buf_state.state == RKCIF_BUF_THESAME &&
+	     buf_stream->buf_state.check_cnt >= 1) ||
+	    (buf_stream->buf_state.state == RKCIF_BUF_LOSS &&
+	     buf_stream->buf_state.check_cnt >= 2)) {
 		if ((dev->rdbk_debug > 2 &&
 		    stream->frame_idx < 15) ||
 		    rkcif_debug == 3) {
@@ -2703,38 +3099,38 @@ void rkcif_assign_check_buffer_update_toisp(struct rkcif_stream *stream)
 				cur_dma_addr = buf_stream->curr_buf_toisp->dummy.dma_addr;
 			if (buf_stream->next_buf_toisp)
 				next_dma_addr = buf_stream->next_buf_toisp->dummy.dma_addr;
-			v4l2_info(&dev->v4l2_dev,
-				  "stream[%d] addr check not equal 0x%x 0x%x state %d chech_cnt %d\n",
-				  stream->id,
-				  cur_dma_addr,
-				  next_dma_addr, buf_stream->toisp_buf_state.state, buf_stream->toisp_buf_state.check_cnt);
+			v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+				 "stream[%d] addr check not equal 0x%x 0x%x state %d chech_cnt %d\n",
+				 stream->id,
+				 cur_dma_addr,
+				 next_dma_addr, buf_stream->buf_state.state, buf_stream->buf_state.check_cnt);
 		}
 		return;
 	}
+	if (buf_stream->curr_buf_toisp)
+		cur_dma_addr = buf_stream->curr_buf_toisp->dummy.dma_addr;
+	if (buf_stream->next_buf_toisp)
+		next_dma_addr = buf_stream->next_buf_toisp->dummy.dma_addr;
 	v4l2_dbg(3, rkcif_debug, &dev->v4l2_dev,
 		 "stream[%d] addr check  0x%x 0x%x state %d chech_cnt %d\n",
 		 stream->id,
 		 cur_dma_addr,
-		 next_dma_addr, buf_stream->toisp_buf_state.state, buf_stream->toisp_buf_state.check_cnt);
+		 next_dma_addr, buf_stream->buf_state.state, buf_stream->buf_state.check_cnt);
 	if (stream->frame_phase == 0)
 		stream->frame_phase = CIF_CSI_FRAME0_READY;
 	frame_phase = stream->frame_phase;
 
-	if (buf_stream->toisp_buf_state.state == RKCIF_TOISP_BUF_LOSS &&
-	    buf_stream->toisp_buf_state.check_cnt == 0)
-		is_dual_update = true;
-
-	if ((buf_stream->toisp_buf_state.state == RKCIF_TOISP_BUF_LOSS ||
-	     buf_stream->toisp_buf_state.state == RKCIF_TOISP_BUF_THESAME) &&
-	    buf_stream->toisp_buf_state.check_cnt == 0)
+	if ((buf_stream->buf_state.state == RKCIF_BUF_LOSS ||
+	     buf_stream->buf_state.state == RKCIF_BUF_THESAME) &&
+	    buf_stream->buf_state.check_cnt == 0)
 		rkcif_check_force_update_buf(buf_stream);
 
 	if ((dev->rdbk_debug > 2 &&
 	     stream->frame_idx < 15) ||
 	     rkcif_debug > 4)
-		v4l2_info(&dev->v4l2_dev,
-			  "stream[%d] check update, lack_buf %d\n",
-			  stream->id, buf_stream->lack_buf_cnt);
+		v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+			 "stream[%d] check update, lack_buf %d\n",
+			 stream->id, buf_stream->lack_buf_cnt);
 	if (mbus_cfg->type == V4L2_MBUS_CSI2_DPHY ||
 	    mbus_cfg->type == V4L2_MBUS_CSI2_CPHY ||
 	    mbus_cfg->type == V4L2_MBUS_CCP2) {
@@ -2751,7 +3147,11 @@ void rkcif_assign_check_buffer_update_toisp(struct rkcif_stream *stream)
 			buffer = list_first_entry(&buf_stream->rx_buf_head,
 						 struct rkcif_rx_buffer, list);
 			if (buffer) {
+				v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "_%d_ stream[%d] del 0x%x from list %p\n",
+					 __LINE__, stream->id, (u32)buffer->dummy.dma_addr, &stream->rx_buf_head);
 				list_del(&buffer->list);
+				buffer->in_rx_list = false;
+				buffer->in_isp = false;
 				buf_stream->curr_buf_toisp = buffer;
 				buff_addr_y = buf_stream->curr_buf_toisp->dummy.dma_addr;
 				if (capture_info->mode == RKMODULE_MULTI_DEV_COMBINE_ONE) {
@@ -2765,17 +3165,21 @@ void rkcif_assign_check_buffer_update_toisp(struct rkcif_stream *stream)
 				if ((dev->rdbk_debug > 1 &&
 				     stream->frame_idx < 15) ||
 				    rkcif_debug > 4)
-					v4l2_info(&dev->v4l2_dev,
-						  "stream[%d] check update, seq %d, addr 0x%x, buf 0x%x\n",
-						  stream->id,
-						  stream->frame_idx - 1, frm_addr_y,
-						  (u32)buf_stream->curr_buf_toisp->dummy.dma_addr);
+					v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+						 "stream[%d] check update, seq %d, addr 0x%x, buf 0x%x\n",
+						 stream->id,
+						 stream->frame_idx - 1, frm_addr_y,
+						 (u32)buf_stream->curr_buf_toisp->dummy.dma_addr);
 			}
 		} else if (frame_phase == CIF_CSI_FRAME1_READY) {
 			buffer = list_first_entry(&buf_stream->rx_buf_head,
 						 struct rkcif_rx_buffer, list);
 			if (buffer) {
+				v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "_%d_ stream[%d] del 0x%x from list %p\n",
+					 __LINE__, stream->id, (u32)buffer->dummy.dma_addr, &stream->rx_buf_head);
 				list_del(&buffer->list);
+				buffer->in_rx_list = false;
+				buffer->in_isp = false;
 				buf_stream->next_buf_toisp = buffer;
 				buff_addr_y = buf_stream->next_buf_toisp->dummy.dma_addr;
 				if (capture_info->mode == RKMODULE_MULTI_DEV_COMBINE_ONE) {
@@ -2789,27 +3193,43 @@ void rkcif_assign_check_buffer_update_toisp(struct rkcif_stream *stream)
 				if ((dev->rdbk_debug > 1 &&
 				     stream->frame_idx < 15) ||
 				    rkcif_debug > 4)
-					v4l2_info(&dev->v4l2_dev,
-						  "stream[%d] check update, seq %d, addr 0x%x, buf 0x%x\n",
-						  stream->id,
-						  stream->frame_idx - 1, frm_addr_y,
-						  (u32)buf_stream->next_buf_toisp->dummy.dma_addr);
+					v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+						 "stream[%d] check update, seq %d, addr 0x%x, buf 0x%x\n",
+						 stream->id,
+						 stream->frame_idx - 1, frm_addr_y,
+						 (u32)buf_stream->next_buf_toisp->dummy.dma_addr);
 			}
 		}
 		if (buf_stream->lack_buf_cnt)
 			buf_stream->lack_buf_cnt--;
 	}
+	/*
+	 * Decide dual-update from source condition:
+	 * only enter when LOSS-recovery first window is active and this
+	 * update cycle did not dequeue a fresh rx buffer.
+	 */
+	is_dual_update = (buf_stream->buf_state.state == RKCIF_BUF_LOSS &&
+			  buf_stream->buf_state.check_cnt == 0 &&
+			  !buffer);
 	if (is_dual_update) {
+		struct rkcif_rx_buffer *old_curr = buf_stream->curr_buf_toisp;
+		struct rkcif_rx_buffer *old_next = buf_stream->next_buf_toisp;
+		bool dump_dual = ((dev->rdbk_debug > 1 &&
+				   stream->frame_idx < 15) ||
+				  rkcif_debug > 4);
+
 		frame_phase_next = frame_phase & CIF_CSI_FRAME0_READY ?
 				CIF_CSI_FRAME1_READY : CIF_CSI_FRAME0_READY;
-		if ((dev->rdbk_debug > 1 &&
-		     stream->frame_idx < 15) ||
-		    rkcif_debug > 4)
-			v4l2_info(&dev->v4l2_dev,
-				  "stream[%d] dual update, seq %d, phase %d\n",
-				  stream->id,
-				  stream->frame_idx - 1,
-				  frame_phase);
+		if (dump_dual)
+			v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+				 "stream[%d] dual update pre: seq %d phase %d old_curr=%pK(0x%x in_list=%d in_isp=%d) old_next=%pK(0x%x in_list=%d in_isp=%d)\n",
+				 stream->id, stream->frame_idx - 1, frame_phase,
+				 old_curr, old_curr ? (u32)old_curr->dummy.dma_addr : 0,
+				 old_curr ? old_curr->in_rx_list : 0,
+				 old_curr ? old_curr->in_isp : 0,
+				 old_next, old_next ? (u32)old_next->dummy.dma_addr : 0,
+				 old_next ? old_next->in_rx_list : 0,
+				 old_next ? old_next->in_isp : 0);
 		if (mbus_cfg->type == V4L2_MBUS_CSI2_DPHY ||
 		    mbus_cfg->type == V4L2_MBUS_CSI2_CPHY ||
 		    mbus_cfg->type == V4L2_MBUS_CCP2) {
@@ -2825,15 +3245,33 @@ void rkcif_assign_check_buffer_update_toisp(struct rkcif_stream *stream)
 			buf_stream->next_buf_toisp = buf_stream->curr_buf_toisp;
 		else
 			buf_stream->curr_buf_toisp = buf_stream->next_buf_toisp;
-		buff_addr_y = buf_stream->curr_buf_toisp->dummy.dma_addr;
-		if (capture_info->mode == RKMODULE_MULTI_DEV_COMBINE_ONE) {
-			rkcif_write_buff_addr_multi_dev_combine(stream, frm_addr_y, 0,
-								buff_addr_y, 0, false);
+		if (dump_dual)
+			v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+				 "stream[%d] dual update post: seq %d phase %d new_curr=%pK(0x%x in_list=%d in_isp=%d) new_next=%pK(0x%x in_list=%d in_isp=%d)\n",
+				 stream->id, stream->frame_idx - 1, frame_phase,
+				 buf_stream->curr_buf_toisp,
+				 buf_stream->curr_buf_toisp ? (u32)buf_stream->curr_buf_toisp->dummy.dma_addr : 0,
+				 buf_stream->curr_buf_toisp ? buf_stream->curr_buf_toisp->in_rx_list : 0,
+				 buf_stream->curr_buf_toisp ? buf_stream->curr_buf_toisp->in_isp : 0,
+				 buf_stream->next_buf_toisp,
+				 buf_stream->next_buf_toisp ? (u32)buf_stream->next_buf_toisp->dummy.dma_addr : 0,
+				 buf_stream->next_buf_toisp ? buf_stream->next_buf_toisp->in_rx_list : 0,
+				 buf_stream->next_buf_toisp ? buf_stream->next_buf_toisp->in_isp : 0);
+		if (!buf_stream->curr_buf_toisp) {
+			v4l2_warn(&dev->v4l2_dev,
+				  "stream[%d] dual update curr_buf_toisp is NULL, seq %d phase %d\n",
+				  stream->id, stream->frame_idx - 1, frame_phase);
 		} else {
-			rkcif_write_register(dev, frm_addr_y, buff_addr_y);
+			buff_addr_y = buf_stream->curr_buf_toisp->dummy.dma_addr;
+			if (capture_info->mode == RKMODULE_MULTI_DEV_COMBINE_ONE) {
+				rkcif_write_buff_addr_multi_dev_combine(stream, frm_addr_y, 0,
+									buff_addr_y, 0, false);
+			} else {
+				rkcif_write_register(dev, frm_addr_y, buff_addr_y);
+			}
 		}
 	}
-	buf_stream->toisp_buf_state.check_cnt++;
+	buf_stream->buf_state.check_cnt++;
 }
 
 static void rkcif_assign_new_buffer_init(struct rkcif_stream *stream,
@@ -2896,7 +3334,7 @@ static void rkcif_assign_new_buffer_init(struct rkcif_stream *stream,
 						     stream->curr_buf->buff_addr[RKCIF_PLANE_CBCR]);
 		}
 	} else {
-		if (dummy_buf->vaddr) {
+		if (dummy_buf->is_allocated) {
 			buff_addr_y = dummy_buf->dma_addr;
 			buff_addr_cbcr = dummy_buf->dma_addr;
 			if (channel->capture_info.mode == RKMODULE_MULTI_DEV_COMBINE_ONE) {
@@ -2952,7 +3390,7 @@ static void rkcif_assign_new_buffer_init(struct rkcif_stream *stream,
 			}
 		}
 
-		if (!stream->next_buf && dummy_buf->vaddr) {
+		if (!stream->next_buf && dummy_buf->is_allocated) {
 			buff_addr_y = dummy_buf->dma_addr;
 			buff_addr_cbcr = dummy_buf->dma_addr;
 			if (channel->capture_info.mode == RKMODULE_MULTI_DEV_COMBINE_ONE) {
@@ -3006,7 +3444,7 @@ static void rkcif_assign_new_buffer_init(struct rkcif_stream *stream,
 		for (ch_id = 0; ch_id < RKCIF_MAX_STREAM_DVP; ch_id++) {
 			if (dev->stream[ch_id].is_dvp_yuv_addr_init)
 				continue;
-			if (dummy_buf->dma_addr) {
+			if (dummy_buf->is_allocated) {
 				rkcif_write_register(dev,
 						     get_dvp_reg_index_of_frm0_y_addr(ch_id),
 						     dummy_buf->dma_addr);
@@ -3101,15 +3539,24 @@ static int rkcif_assign_new_buffer_update(struct rkcif_stream *stream,
 
 	spin_lock_irqsave(&stream->vbq_lock, flags);
 	if (dev->channels[0].capture_info.mode == RKMODULE_ONE_CH_TO_MULTI_ISP &&
-	    (buf_stream->state != RKCIF_STATE_STREAMING || buf_stream->stopping)) {
-		buffer = NULL;
-		if (stream->frame_phase == CIF_CSI_FRAME0_READY)
-			stream->curr_buf = NULL;
-		else
-			stream->next_buf = NULL;
-	} else if (!list_empty(&buf_stream->buf_head)) {
+	    (buf_stream->state != RKCIF_STATE_STREAMING || buf_stream->stopping) &&
+	    buf_stream->id != 0) {
+		buf_stream = &dev->stream[0];
+		if (buf_stream->state == RKCIF_STATE_STREAMING) {
+			if (buf_stream->buf_replace_cnt < 2)
+				buf_stream->buf_replace_cnt++;
+			if (buf_stream->buf_replace_cnt == 2) {
+				buf_stream->stopping = false;
+				wake_up(&buf_stream->wq_stopped);
+			}
+			v4l2_dbg(3, rkcif_debug, &dev->v4l2_dev,
+				 "stream[%d] buffer replace_cnt %d\n",
+				 buf_stream->id, buf_stream->buf_replace_cnt);
+		}
+	}
+	if (!list_empty(&buf_stream->buf_head)) {
 
-		if (!dummy_buf->vaddr &&
+		if (!dummy_buf->is_allocated &&
 		    stream->curr_buf == stream->next_buf &&
 		    rkcif_get_interlace_mode(stream) != RKCIF_INTERLACE_SOFT)
 			ret = -EINVAL;
@@ -3151,7 +3598,7 @@ static int rkcif_assign_new_buffer_update(struct rkcif_stream *stream,
 		}
 	} else {
 		buffer = NULL;
-		if (!(stream->cur_stream_mode & RKCIF_STREAM_MODE_TOISP) && dummy_buf->vaddr) {
+		if (!(stream->cur_stream_mode & RKCIF_STREAM_MODE_TOISP) && dummy_buf->is_allocated) {
 			if (stream->frame_phase == CIF_CSI_FRAME0_READY) {
 				stream->curr_buf  = NULL;
 			} else if (stream->frame_phase == CIF_CSI_FRAME1_READY) {
@@ -3203,11 +3650,11 @@ static int rkcif_assign_new_buffer_update(struct rkcif_stream *stream,
 			if (dbufs)
 				rkcif_s_rx_buffer(stream, dbufs);
 		}
-	} else if (dummy_buf) {
+	} else if (dummy_buf->is_allocated) {
 		buff_addr_y = dummy_buf->dma_addr;
 		buff_addr_cbcr = dummy_buf->dma_addr;
 	}
-	if (buffer || dummy_buf) {
+	if (buffer || dummy_buf->is_allocated) {
 		if (rkcif_get_interlace_mode(stream) == RKCIF_INTERLACE_SOFT &&
 		    stream->frame_phase == CIF_CSI_FRAME1_READY) {
 			if (channel->capture_info.mode == RKMODULE_MULTI_DEV_COMBINE_ONE) {
@@ -3290,7 +3737,7 @@ static int rkcif_get_new_buffer_wake_up_mode(struct rkcif_stream *stream)
 
 	spin_lock_irqsave(&stream->vbq_lock, flags);
 	if (!list_empty(&stream->buf_head)) {
-		if (!dummy_buf->vaddr &&
+		if (!dummy_buf->is_allocated &&
 		    stream->curr_buf == stream->next_buf)
 			ret = -EINVAL;
 		if (stream->line_int_cnt % 2) {
@@ -3309,7 +3756,7 @@ static int rkcif_get_new_buffer_wake_up_mode(struct rkcif_stream *stream)
 			stream->lack_buf_cnt--;
 	} else {
 		stream->is_buf_active = false;
-		if (dummy_buf->vaddr) {
+		if (dummy_buf->is_allocated) {
 			if (stream->line_int_cnt % 2)
 				stream->curr_buf = NULL;
 			else
@@ -3392,7 +3839,7 @@ static int rkcif_update_new_buffer_wake_up_mode(struct rkcif_stream *stream)
 				rkcif_write_register(dev, frm_addr_uv, buff_addr_cbcr);
 		}
 	} else {
-		if (dummy_buf->vaddr) {
+		if (dummy_buf->is_allocated) {
 			buff_addr_y = dummy_buf->dma_addr;
 			buff_addr_cbcr = dummy_buf->dma_addr;
 			if (capture_info->mode == RKMODULE_MULTI_DEV_COMBINE_ONE) {
@@ -3427,31 +3874,46 @@ static int rkcif_get_new_buffer_wake_up_mode_rdbk(struct rkcif_stream *stream)
 	struct v4l2_mbus_config *mbus_cfg = &dev->active_sensor->mbus;
 	int ret = 0;
 	unsigned long flags;
-	u32 frm_addr_y;
+	u32 frm_addr_y, frm_addr_y_sec;
 	int frame_phase = 0;
+	bool is_dual_update = false;
 
 	spin_lock_irqsave(&stream->vbq_lock, flags);
-	memset(&stream->toisp_buf_state, 0, sizeof(stream->toisp_buf_state));
+	memset(&stream->buf_state, 0, sizeof(stream->buf_state));
 	if (!list_empty(&stream->rx_buf_head)) {
 		if (stream->curr_buf_toisp && stream->next_buf_toisp &&
-		    stream->curr_buf_toisp != stream->next_buf_toisp)
-			stream->toisp_buf_state.state = RKCIF_TOISP_BUF_ROTATE;
-		else
-			stream->toisp_buf_state.state = RKCIF_TOISP_BUF_LOSS;
+		    stream->curr_buf_toisp != stream->next_buf_toisp) {
+			stream->buf_state.state = RKCIF_BUF_ROTATE;
+		} else {
+			stream->buf_state.state = RKCIF_BUF_LOSS;
+			is_dual_update = true;
+		}
 		if (stream->line_int_cnt % 2) {
 			buffer = list_first_entry(&stream->rx_buf_head,
 						 struct rkcif_rx_buffer, list);
 			if (buffer) {
+				v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "_%d_ stream[%d] del 0x%x from list %p\n",
+					 __LINE__, stream->id, (u32)buffer->dummy.dma_addr, &stream->rx_buf_head);
 				list_del(&buffer->list);
+				buffer->in_rx_list = false;
+				buffer->in_isp = false;
 				stream->curr_buf_toisp = buffer;
+				if (is_dual_update)
+					stream->next_buf_toisp = buffer;
 			}
 			frame_phase = CIF_CSI_FRAME0_READY;
 		} else {
 			buffer = list_first_entry(&stream->rx_buf_head,
 						 struct rkcif_rx_buffer, list);
 			if (buffer) {
+				v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "_%d_ stream[%d] del 0x%x from list %p\n",
+					 __LINE__, stream->id, (u32)buffer->dummy.dma_addr, &stream->rx_buf_head);
 				list_del(&buffer->list);
+				buffer->in_rx_list = false;
+				buffer->in_isp = false;
 				stream->next_buf_toisp = buffer;
+				if (is_dual_update)
+					stream->curr_buf_toisp = buffer;
 			}
 			frame_phase = CIF_CSI_FRAME1_READY;
 		}
@@ -3476,26 +3938,41 @@ static int rkcif_get_new_buffer_wake_up_mode_rdbk(struct rkcif_stream *stream)
 					  "stream[%d] hold buf %x\n",
 					  stream->id,
 					  (u32)stream->next_buf_toisp->dummy.dma_addr);
-			stream->toisp_buf_state.state = RKCIF_TOISP_BUF_THESAME;
+			stream->buf_state.state = RKCIF_BUF_THESAME;
 		} else {
 			ret = -EINVAL;
-			stream->toisp_buf_state.state = RKCIF_TOISP_BUF_LOSS;
+			stream->buf_state.state = RKCIF_BUF_LOSS;
+			stream->curr_buf_toisp = NULL;
+			stream->next_buf_toisp = NULL;
 		}
 	}
 	if (buffer) {
 		if (mbus_cfg->type == V4L2_MBUS_CSI2_DPHY ||
 		    mbus_cfg->type == V4L2_MBUS_CSI2_CPHY ||
 		    mbus_cfg->type == V4L2_MBUS_CCP2) {
-			frm_addr_y = frame_phase & CIF_CSI_FRAME0_READY ?
-				     get_reg_index_of_frm0_y_addr(stream->id) :
-				     get_reg_index_of_frm1_y_addr(stream->id);
+			if (is_dual_update) {
+				frm_addr_y = get_reg_index_of_frm0_y_addr(stream->id);
+				frm_addr_y_sec = get_reg_index_of_frm1_y_addr(stream->id);
+			} else {
+				frm_addr_y = frame_phase & CIF_CSI_FRAME0_READY ?
+					     get_reg_index_of_frm0_y_addr(stream->id) :
+					     get_reg_index_of_frm1_y_addr(stream->id);
+			}
 		} else {
-			frm_addr_y = frame_phase & CIF_CSI_FRAME0_READY ?
-				     get_dvp_reg_index_of_frm0_y_addr(stream->id) :
-				     get_dvp_reg_index_of_frm1_y_addr(stream->id);
+			if (is_dual_update) {
+				frm_addr_y = get_dvp_reg_index_of_frm0_y_addr(stream->id);
+				frm_addr_y_sec = get_dvp_reg_index_of_frm1_y_addr(stream->id);
+			} else {
+				frm_addr_y = frame_phase & CIF_CSI_FRAME0_READY ?
+					     get_dvp_reg_index_of_frm0_y_addr(stream->id) :
+					     get_dvp_reg_index_of_frm1_y_addr(stream->id);
+			}
 		}
 		rkcif_write_register(dev, frm_addr_y,
 				     buffer->dummy.dma_addr);
+		if (is_dual_update)
+			rkcif_write_register(dev, frm_addr_y_sec,
+					     buffer->dummy.dma_addr);
 		if (dev->rdbk_debug > 1 &&
 		    stream->frame_idx < 15)
 			v4l2_info(&dev->v4l2_dev,
@@ -3521,7 +3998,7 @@ static void rkcif_assign_dummy_buffer(struct rkcif_stream *stream)
 	/* for BT.656/BT.1120 multi channels function,
 	 * yuv addr of unused channel must be set
 	 */
-	if (mbus_cfg->type == V4L2_MBUS_BT656 && dummy_buf->vaddr) {
+	if (mbus_cfg->type == V4L2_MBUS_BT656 && dummy_buf->is_allocated) {
 		rkcif_write_register(dev,
 				     get_dvp_reg_index_of_frm0_y_addr(stream->id),
 				     dummy_buf->dma_addr);
@@ -3594,7 +4071,7 @@ static void rkcif_assign_new_buffer_init_rockit(struct rkcif_stream *stream,
 			rkcif_write_register(dev, frm0_addr_uv,
 					     stream->curr_buf_rockit->buff_addr[RKCIF_PLANE_CBCR]);
 	} else {
-		if (dummy_buf->vaddr) {
+		if (dummy_buf->is_allocated) {
 			rkcif_write_register(dev, frm0_addr_y, dummy_buf->dma_addr);
 			if (stream->cif_fmt_out->fmt_type != CIF_FMT_TYPE_RAW)
 				rkcif_write_register(dev, frm0_addr_uv, dummy_buf->dma_addr);
@@ -3630,7 +4107,7 @@ static void rkcif_assign_new_buffer_init_rockit(struct rkcif_stream *stream,
 				rkcif_write_register(dev, frm1_addr_uv,
 						     stream->next_buf_rockit->buff_addr[RKCIF_PLANE_CBCR]);
 		} else {
-			if (dummy_buf->vaddr) {
+			if (dummy_buf->is_allocated) {
 				rkcif_write_register(dev, frm1_addr_y, dummy_buf->dma_addr);
 				if (stream->cif_fmt_out->fmt_type != CIF_FMT_TYPE_RAW)
 					rkcif_write_register(dev, frm1_addr_uv, dummy_buf->dma_addr);
@@ -3661,7 +4138,7 @@ static void rkcif_assign_new_buffer_init_rockit(struct rkcif_stream *stream,
 		for (ch_id = 0; ch_id < RKCIF_MAX_STREAM_DVP; ch_id++) {
 			if (dev->stream[ch_id].is_dvp_yuv_addr_init)
 				continue;
-			if (dummy_buf->dma_addr) {
+			if (dummy_buf->is_allocated) {
 				rkcif_write_register(dev,
 						     get_dvp_reg_index_of_frm0_y_addr(ch_id),
 						     dummy_buf->dma_addr);
@@ -3711,9 +4188,14 @@ static int rkcif_assign_new_buffer_update_rockit(struct rkcif_stream *stream,
 	}
 
 	spin_lock_irqsave(&stream->vbq_lock, flags);
+	memset(&stream->buf_state, 0, sizeof(stream->buf_state));
 	if (!list_empty(&stream->rockit_buf_head)) {
-
-		if (!dummy_buf->vaddr &&
+		if (stream->curr_buf_rockit && stream->next_buf_rockit &&
+		    stream->curr_buf_rockit != stream->next_buf_rockit)
+			stream->buf_state.state = RKCIF_BUF_ROTATE;
+		else
+			stream->buf_state.state = RKCIF_BUF_LOSS;
+		if (!dummy_buf->is_allocated &&
 		    stream->curr_buf_rockit == stream->next_buf_rockit &&
 		    (rkcif_get_interlace_mode(stream) != RKCIF_INTERLACE_SOFT ||
 		     rkcif_get_interlace_mode(stream) == RKCIF_INTERLACE_SOFT_AUTO))
@@ -3751,7 +4233,7 @@ static int rkcif_assign_new_buffer_update_rockit(struct rkcif_stream *stream,
 		}
 	} else {
 		buffer = NULL;
-		if (dummy_buf->vaddr) {
+		if (dummy_buf->is_allocated) {
 			if (stream->frame_phase == CIF_CSI_FRAME0_READY) {
 				stream->curr_buf_rockit  = NULL;
 			} else if (stream->frame_phase == CIF_CSI_FRAME1_READY) {
@@ -3774,11 +4256,13 @@ static int rkcif_assign_new_buffer_update_rockit(struct rkcif_stream *stream,
 			}
 			if (stream->lack_buf_cnt < 2)
 				stream->lack_buf_cnt++;
+			stream->buf_state.state = RKCIF_BUF_THESAME;
 		} else {
 			stream->curr_buf_rockit = NULL;
 			stream->next_buf_rockit = NULL;
 			if (stream->lack_buf_cnt < 2)
 				stream->lack_buf_cnt++;
+			stream->buf_state.state = RKCIF_BUF_LOSS;
 		}
 	}
 	stream->frame_phase_cache = stream->frame_phase;
@@ -3800,7 +4284,7 @@ static int rkcif_assign_new_buffer_update_rockit(struct rkcif_stream *stream,
 						     buffer->buff_addr[RKCIF_PLANE_CBCR]);
 		}
 	} else {
-		if (dummy_buf->vaddr) {
+		if (dummy_buf->is_allocated) {
 			rkcif_write_register(dev, frm_addr_y, dummy_buf->dma_addr);
 			if (stream->cif_fmt_out->fmt_type != CIF_FMT_TYPE_RAW)
 				rkcif_write_register(dev, frm_addr_uv, dummy_buf->dma_addr);
@@ -3845,14 +4329,29 @@ void rkcif_check_buffer_update_pingpong_rockit(struct rkcif_stream *stream,
 
 	if (stream->state != RKCIF_STATE_STREAMING ||
 	    rkcif_get_interlace_mode(stream) == RKCIF_INTERLACE_SOFT ||
-	    rkcif_get_interlace_mode(stream) == RKCIF_INTERLACE_SOFT_AUTO)
+	    rkcif_get_interlace_mode(stream) == RKCIF_INTERLACE_SOFT_AUTO ||
+	    stream->buf_state.state == RKCIF_BUF_ROTATE ||
+	    (stream->buf_state.state == RKCIF_BUF_THESAME &&
+	     stream->buf_state.check_cnt >= 1) ||
+	    (stream->buf_state.state == RKCIF_BUF_LOSS &&
+	     stream->buf_state.check_cnt >= 2))
 		return;
 
+	frame_phase = stream->frame_phase_cache;
+	if (stream->buf_state.state == RKCIF_BUF_LOSS) {
+		if (stream->buf_state.check_cnt == 0) {
+			is_dual_update_buf = true;
+		} else {
+			if (frame_phase == CIF_CSI_FRAME0_READY)
+				frame_phase = CIF_CSI_FRAME1_READY;
+			else
+				frame_phase = CIF_CSI_FRAME0_READY;
+		}
+	}
 	spin_lock_irqsave(&stream->vbq_lock, flags);
 	if (stream->curr_buf_rockit == stream->next_buf_rockit ||
 	    stream->curr_buf_rockit == NULL ||
 	    stream->next_buf_rockit == NULL) {
-		frame_phase = stream->frame_phase_cache;
 		if (!stream->is_line_wake_up ||
 		    (stream->is_line_wake_up && stream->frame_idx < 2)) {
 			if (mbus_cfg->type == V4L2_MBUS_CSI2_DPHY ||
@@ -3875,12 +4374,10 @@ void rkcif_check_buffer_update_pingpong_rockit(struct rkcif_stream *stream,
 				frm_addr_y = frm1_addr_y;
 				frm_addr_uv = frm1_addr_uv;
 			}
-			if (!stream->dma_en && stream->curr_buf_rockit == NULL && stream->next_buf_rockit == NULL)
-				is_dual_update_buf = true;
 			if (!list_empty(&stream->rockit_buf_head)) {
 				if (frame_phase == CIF_CSI_FRAME0_READY) {
 					stream->curr_buf_rockit = list_first_entry(&stream->rockit_buf_head,
-									    struct rkcif_buffer, queue);
+										   struct rkcif_buffer, queue);
 					if (stream->curr_buf_rockit) {
 						list_del(&stream->curr_buf_rockit->queue);
 						buffer = stream->curr_buf_rockit;
@@ -3889,7 +4386,7 @@ void rkcif_check_buffer_update_pingpong_rockit(struct rkcif_stream *stream,
 						stream->next_buf_rockit = buffer;
 				} else if (frame_phase == CIF_CSI_FRAME1_READY) {
 					stream->next_buf_rockit = list_first_entry(&stream->rockit_buf_head,
-								    struct rkcif_buffer, queue);
+										   struct rkcif_buffer, queue);
 					if (stream->next_buf_rockit) {
 						list_del(&stream->next_buf_rockit->queue);
 						buffer = stream->next_buf_rockit;
@@ -3934,7 +4431,7 @@ void rkcif_check_buffer_update_pingpong_rockit(struct rkcif_stream *stream,
 			if (stream->curr_buf_rockit == stream->next_buf_rockit) {
 				if (stream->frame_phase_cache == CIF_CSI_FRAME0_READY) {
 					stream->curr_buf_rockit = list_first_entry(&stream->rockit_buf_head,
-									    struct rkcif_buffer, queue);
+										   struct rkcif_buffer, queue);
 					v4l2_dbg(3, rkcif_debug, &dev->v4l2_dev,
 						 "%s %d, stream[%d] buf idx %d\n",
 						 __func__, __LINE__, stream->id, stream->curr_buf_rockit->vb.vb2_buf.index);
@@ -3942,7 +4439,7 @@ void rkcif_check_buffer_update_pingpong_rockit(struct rkcif_stream *stream,
 						list_del(&stream->curr_buf_rockit->queue);
 				} else if (stream->frame_phase_cache == CIF_CSI_FRAME1_READY) {
 					stream->next_buf_rockit = list_first_entry(&stream->rockit_buf_head,
-									    struct rkcif_buffer, queue);
+										   struct rkcif_buffer, queue);
 					v4l2_dbg(4, rkcif_debug, &dev->v4l2_dev,
 						 "%s %d, stream[%d] buf idx %d\n",
 						 __func__, __LINE__, stream->id, stream->next_buf_rockit->vb.vb2_buf.index);
@@ -4003,7 +4500,7 @@ static void rkcif_csi_set_lvds_sav_eav(struct rkcif_stream *stream,
 	struct rkmodule_lvds_frm_sync_code *odd_sync_code = NULL;
 	struct rkmodule_lvds_frm_sync_code *even_sync_code = NULL;
 
-	if (dev->hdr.hdr_mode == NO_HDR || dev->hdr.hdr_mode == HDR_COMPR) {
+	if (dev->hdr.hdr_mode == NO_HDR || dev->hdr.hdr_mode == HDR_CIS_MERGE) {
 		frm_sync_code = &lvds_cfg->frm_sync_code[LVDS_CODE_GRP_LINEAR];
 		odd_sync_code = &frm_sync_code->odd_sync_code;
 		even_sync_code = odd_sync_code;
@@ -4092,8 +4589,8 @@ static int rkcif_csi_channel_init(struct rkcif_stream *stream,
 	struct sditf_priv *priv = dev->sditf[0];
 	const struct cif_output_fmt *fmt;
 	u32 fourcc;
-	int vc = dev->channels[stream->id].vc;
-	u32 raw_bpp = 0;
+	int vc = stream->channel_info.vc;
+	u32 bpp = 0;
 
 	channel->enable = 1;
 	channel->width = stream->pixm.width;
@@ -4137,12 +4634,9 @@ static int rkcif_csi_channel_init(struct rkcif_stream *stream,
 		return -EINVAL;
 	}
 
-	if (channel->capture_info.mode == RKMODULE_MULTI_DEV_COMBINE_ONE)
-		channel->width /=  channel->capture_info.multi_dev.dev_num;
-
 	if (dev->sditf[0] && dev->sditf[0]->mode.rdbk_mode == RKISP_VICAP_ONLINE_UNITE &&
 	    (dev->hdr.hdr_mode == NO_HDR ||
-	     dev->hdr.hdr_mode == HDR_COMPR ||
+	     dev->hdr.hdr_mode == HDR_CIS_MERGE ||
 	     (dev->hdr.hdr_mode == HDR_X2 && stream->id == 1) ||
 	     (dev->hdr.hdr_mode == HDR_X3 && stream->id == 2))) {
 		channel->crop_st_x += channel->width / 2;
@@ -4150,6 +4644,11 @@ static int rkcif_csi_channel_init(struct rkcif_stream *stream,
 		channel->width /= 2;
 		channel->width += dev->unite_extend_pixel;
 	}
+	if (stream->cif_fmt_in->mbus_code == MEDIA_BUS_FMT_UYVY10_2X10 ||
+	    stream->cif_fmt_in->mbus_code == MEDIA_BUS_FMT_VYUY10_2X10 ||
+	    stream->cif_fmt_in->mbus_code == MEDIA_BUS_FMT_YUYV10_2X10 ||
+	    stream->cif_fmt_in->mbus_code == MEDIA_BUS_FMT_YVYU10_2X10)
+		channel->width = channel->width * 2;
 	/*
 	 * for mipi or lvds, when enable compact, the virtual width of raw10/raw12
 	 * needs aligned with :ALIGN(bits_per_pixel * width / 8, 8), if enable 16bit mode
@@ -4165,23 +4664,23 @@ static int rkcif_csi_channel_init(struct rkcif_stream *stream,
 		     fmt->fourcc == V4L2_PIX_FMT_SGBRG14 ||
 		     fmt->fourcc == V4L2_PIX_FMT_SGRBG14 ||
 		     fmt->fourcc == V4L2_PIX_FMT_SRGGB14))
-			raw_bpp = 12;
+			bpp = 12;
 		else
-			raw_bpp = fmt->raw_bpp;
-		if (channel->capture_info.mode == RKMODULE_MULTI_DEV_COMBINE_ONE) {
-			channel->virtual_width = ALIGN(channel->width * 2 * raw_bpp / 8, 256);
-			channel->left_virtual_width = channel->width * raw_bpp / 8;
-		} else {
-			channel->virtual_width = ALIGN(channel->width * raw_bpp / 8, 256);
-		}
+			bpp = fmt->raw_bpp;
+		channel->virtual_width = ALIGN(channel->width * bpp / 8, 256);
 	} else {
-		if (channel->capture_info.mode == RKMODULE_MULTI_DEV_COMBINE_ONE) {
-			channel->virtual_width = ALIGN(channel->width * 2 * fmt->bpp[0] / 8, 8);
-			channel->left_virtual_width = ALIGN(channel->width * fmt->bpp[0] / 8, 8);
-		} else {
-			channel->virtual_width = ALIGN(channel->width * fmt->bpp[0] / 8, 8);
-		}
+		bpp = fmt->bpp[0];
+		if (fmt->csi_fmt_val == CSI_WRDDR_TYPE_RGB888)
+			channel->virtual_width = ALIGN_ANY_SAFE(channel->width * bpp / 8, 24);
+		else
+			channel->virtual_width = ALIGN(channel->width * bpp / 8, 8);
 	}
+
+	if (channel->capture_info.mode == RKMODULE_MULTI_DEV_COMBINE_ONE) {
+		channel->width /= channel->capture_info.multi_dev.dev_num;
+		channel->left_virtual_width = ALIGN(channel->width * bpp / 8, 8);
+	}
+
 	if (dev->chip_id > CHIP_RK3562_CIF && stream->sw_dbg_en)
 		channel->virtual_width = (channel->virtual_width + 23) / 24 * 24;
 
@@ -4213,18 +4712,20 @@ static int rkcif_csi_channel_init(struct rkcif_stream *stream,
 		channel->virtual_width *= 2;
 		channel->height /= 2;
 	}
-	if (dev->channels[stream->id].data_type)
-		channel->data_type = dev->channels[stream->id].data_type;
+	if (stream->channel_info.data_type && !dev->terminal_sensor.hdmi_input_en)
+		channel->data_type = stream->channel_info.data_type;
 	else
 		channel->data_type = get_data_type(stream->cif_fmt_in->mbus_code,
 						   channel->cmd_mode_en,
 						   channel->dsi_input);
 
+	if (stream->channel_info.data_bit)
+		channel->data_bit = stream->channel_info.data_bit;
 	channel->csi_fmt_val = get_csi_fmt_val(stream,
 					       &dev->channels[stream->id]);
 
 	if (dev->hdr.hdr_mode == NO_HDR ||
-	    dev->hdr.hdr_mode == HDR_COMPR ||
+	    dev->hdr.hdr_mode == HDR_CIS_MERGE ||
 	    (dev->hdr.hdr_mode == HDR_X2 && stream->id > 1) ||
 	    (dev->hdr.hdr_mode == HDR_X3 && stream->id > 2))
 		channel->vc = vc < 4 ? vc : channel->id;
@@ -4259,7 +4760,7 @@ static void rkcif_write_buffer(struct rkcif_stream *stream, struct rkcif_buffer 
 			rkcif_write_register(dev, frm_addr_uv,
 				buffer->buff_addr[RKCIF_PLANE_CBCR] +
 				even_offset * (channel->virtual_width / 2));
-	} else if (dummy_buf->vaddr) {
+	} else if (dummy_buf->is_allocated) {
 		rkcif_write_register(dev, frm_addr_y, dummy_buf->dma_addr);
 		if (stream->cif_fmt_out->fmt_type != CIF_FMT_TYPE_RAW)
 			rkcif_write_register(dev, frm_addr_uv, dummy_buf->dma_addr);
@@ -4291,7 +4792,7 @@ static void rkcif_buf_init_interlace(struct rkcif_stream *stream, int channel_id
 		rkcif_write_buffer(stream, stream->curr_buf, CIF_CSI_FRAME0_READY, buf_offset);
 		rkcif_write_buffer(stream, stream->curr_buf, CIF_CSI_FRAME1_READY, buf_offset);
 	} else {
-		if (dummy_buf->vaddr) {
+		if (dummy_buf->is_allocated) {
 			rkcif_write_buffer(stream, NULL, CIF_CSI_FRAME0_READY, 0);
 			rkcif_write_buffer(stream, NULL, CIF_CSI_FRAME1_READY, 0);
 		} else {
@@ -4533,6 +5034,7 @@ static int rkcif_csi_get_output_type_mask(struct rkcif_stream *stream)
 	case V4L2_PIX_FMT_Y10:
 	case V4L2_PIX_FMT_Y12:
 	case V4L2_PIX_FMT_Y14:
+	case V4L2_PIX_FMT_Y210:
 		if (stream->is_compact)
 			mask = CSI_WRDDR_TYPE_RAW_COMPACT;
 		else
@@ -4608,6 +5110,7 @@ static int rkcif_csi_get_output_type_mask_rk3576(struct rkcif_stream *stream)
 	case V4L2_PIX_FMT_Y10:
 	case V4L2_PIX_FMT_Y12:
 	case V4L2_PIX_FMT_Y14:
+	case V4L2_PIX_FMT_Y210:
 		if (stream->is_compact)
 			mask = CSI_WRDDR_TYPE_RAW_COMPACT << 3;
 		else
@@ -4693,6 +5196,7 @@ static int rkcif_lvds_get_output_type_mask(struct rkcif_stream *stream)
 	case V4L2_PIX_FMT_GREY:
 	case V4L2_PIX_FMT_Y10:
 	case V4L2_PIX_FMT_Y12:
+	case V4L2_PIX_FMT_Y210:
 		if (stream->is_compact)
 			mask = CSI_WRDDR_TYPE_RAW_COMPACT << wr_type_offset;
 		else
@@ -4728,6 +5232,7 @@ static void rkcif_modify_frame_skip_config(struct rkcif_stream *stream)
 		stream->skip_info.skip_to_en = false;
 	} else if (stream->skip_info.skip_to_dis) {
 		rkcif_disable_skip_frame(stream);
+		stream->skip_info.skip_to_dis = false;
 	}
 }
 
@@ -5026,22 +5531,25 @@ static int rkcif_csi_channel_set_v1(struct rkcif_stream *stream,
 	rkcif_write_register(dev, get_reg_index_of_id_crop_start(channel->id),
 			     channel->crop_st_y << 16 | channel->crop_st_x);
 
-	if (mode == RKCIF_STREAM_MODE_CAPTURE) {
-		if (rkcif_get_interlace_mode(stream) == RKCIF_INTERLACE_SOFT_AUTO)
-			rkcif_buf_init_interlace(stream, channel->id);
-		else
-			rkcif_assign_new_buffer_pingpong(stream,
-							 RKCIF_YUV_ADDR_STATE_INIT,
-							 channel->id);
-	} else if (mode == RKCIF_STREAM_MODE_TOISP ||
-		 mode == RKCIF_STREAM_MODE_TOISP_RDBK) {
-		rkcif_assign_new_buffer_pingpong_toisp(stream,
-						       RKCIF_YUV_ADDR_STATE_INIT,
-						       channel->id);
-	} else if (mode == RKCIF_STREAM_MODE_ROCKIT) {
-		rkcif_assign_new_buffer_pingpong_rockit(stream,
-							RKCIF_YUV_ADDR_STATE_INIT,
-							channel->id);
+	if (!(capture_info->mode == RKMODULE_MULTI_DEV_COMBINE_ONE &&
+	      index < capture_info->multi_dev.dev_num - 1)) {
+		if (mode == RKCIF_STREAM_MODE_CAPTURE) {
+			if (rkcif_get_interlace_mode(stream) == RKCIF_INTERLACE_SOFT_AUTO)
+				rkcif_buf_init_interlace(stream, channel->id);
+			else
+				rkcif_assign_new_buffer_pingpong(stream,
+								 RKCIF_YUV_ADDR_STATE_INIT,
+								 channel->id);
+		} else if (mode == RKCIF_STREAM_MODE_TOISP ||
+			 mode == RKCIF_STREAM_MODE_TOISP_RDBK) {
+			rkcif_assign_new_buffer_pingpong_toisp(stream,
+							       RKCIF_YUV_ADDR_STATE_INIT,
+							       channel->id);
+		} else if (mode == RKCIF_STREAM_MODE_ROCKIT) {
+			rkcif_assign_new_buffer_pingpong_rockit(stream,
+								RKCIF_YUV_ADDR_STATE_INIT,
+								channel->id);
+		}
 	}
 
 	if (capture_info->mode == RKMODULE_MULTI_DEV_COMBINE_ONE &&
@@ -5051,19 +5559,6 @@ static int rkcif_csi_channel_set_v1(struct rkcif_stream *stream,
 				     channel->crop_st_y << 16 |
 				     (channel->crop_st_x + capture_info->multi_dev.pixel_offset));
 
-	if (!(capture_info->mode == RKMODULE_MULTI_DEV_COMBINE_ONE &&
-	      index < capture_info->multi_dev.dev_num - 1)) {
-		if (mode == RKCIF_STREAM_MODE_CAPTURE)
-			rkcif_assign_new_buffer_pingpong(stream,
-						 RKCIF_YUV_ADDR_STATE_INIT,
-						 channel->id);
-		else if (mode == RKCIF_STREAM_MODE_TOISP ||
-			 mode == RKCIF_STREAM_MODE_TOISP_RDBK)
-			rkcif_assign_new_buffer_pingpong_toisp(stream,
-						       RKCIF_YUV_ADDR_STATE_INIT,
-						       channel->id);
-	}
-
 	val = channel->virtual_width;
 	if (dev->chip_id >= CHIP_RV1103B_CIF && dev->sditf[0] &&
 	    dev->sditf[0]->hdr_wrap_line)
@@ -5072,7 +5567,7 @@ static int rkcif_csi_channel_set_v1(struct rkcif_stream *stream,
 		val |= BIT(31);
 	rkcif_write_register(dev, get_reg_index_of_frm0_y_vlw(channel->id), val);
 
-	if (stream->lack_buf_cnt == 2)
+	if (stream->lack_buf_cnt == 2 || dev->is_in_flip)
 		stream->dma_en = 0;
 
 	if (stream->dma_en) {
@@ -5094,7 +5589,7 @@ static int rkcif_csi_channel_set_v1(struct rkcif_stream *stream,
 			channel->vc = 0;
 
 		if (dev->chip_id > CHIP_RK3562_CIF) {
-			val = CSI_ENABLE_CAPTURE | dma_en |
+			val = dma_en |
 			      CSI_ENABLE_CROP_RK3576;
 			val |= rkcif_get_parse_type_rk3576(stream->cif_fmt_in, channel);
 			val |= rkcif_csi_get_output_type_mask_rk3576(stream);
@@ -5113,12 +5608,14 @@ static int rkcif_csi_channel_set_v1(struct rkcif_stream *stream,
 			if (dev->chip_id >= CHIP_RV1103B_CIF && stream->rounding_bit)
 				val |= stream->rounding_bit;
 
+			if (!dev->is_in_flip)
+				val |= CSI_ENABLE_CAPTURE;
 			rkcif_write_register(dev, get_reg_index_of_id_ctrl0(channel->id), val);
 
 			val = channel->vc | channel->data_type << 2;
 
 			if (stream->cifdev->hdr.hdr_mode == NO_HDR ||
-			    stream->cifdev->hdr.hdr_mode == HDR_COMPR)
+			    stream->cifdev->hdr.hdr_mode == HDR_CIS_MERGE)
 				val |= CSI_NO_HDR >> 12;
 			else if (stream->cifdev->hdr.hdr_mode == HDR_X2)
 				val |= CSI_HDR2 >> 12;
@@ -5153,7 +5650,7 @@ static int rkcif_csi_channel_set_v1(struct rkcif_stream *stream,
 			val |= stream->cif_fmt_in->csi_yuv_order;
 			val |= rkcif_csi_get_output_type_mask(stream);
 			if (stream->cifdev->hdr.hdr_mode == NO_HDR ||
-			    stream->cifdev->hdr.hdr_mode == HDR_COMPR)
+			    stream->cifdev->hdr.hdr_mode == HDR_CIS_MERGE)
 				val |= CSI_NO_HDR;
 			else if (stream->cifdev->hdr.hdr_mode == HDR_X2)
 				val |= CSI_HDR2;
@@ -5172,13 +5669,15 @@ static int rkcif_csi_channel_set_v1(struct rkcif_stream *stream,
 				val |= CSI_HIGH_ALIGN_RK3588;
 			else
 				val &= ~CSI_HIGH_ALIGN_RK3588;
+			if (!dev->is_in_flip)
+				val |= CSI_ENABLE_CAPTURE;
 			rkcif_write_register(dev, get_reg_index_of_id_ctrl0(channel->id), val);
 		}
 		rkcif_write_register(dev, CIF_REG_MIPI_EFFECT_CODE_ID0, 0x02410251);
 		rkcif_write_register(dev, CIF_REG_MIPI_EFFECT_CODE_ID1, 0x02420252);
 	} else if (mbus_type == V4L2_MBUS_CCP2) {
 		rkcif_csi_set_lvds_sav_eav(stream, channel);
-		val = LVDS_ENABLE_CAPTURE_RV1106 | LVDS_MODE_RV1106(channel->lvds_cfg.mode) |
+		val = LVDS_MODE_RV1106(channel->lvds_cfg.mode) |
 		      LVDS_MAIN_LANE_RV1106(0) | LVDS_FID_RV1106(0) |
 		      LVDS_LANES_ENABLED_RV1106(dev->active_sensor->lanes) |
 		      (channel->csi_fmt_val << 18) |
@@ -5187,6 +5686,8 @@ static int rkcif_csi_channel_set_v1(struct rkcif_stream *stream,
 		      dma_en;
 		if (stream->cifdev->hdr.hdr_mode == HDR_X3)
 			val |= BIT(12);
+		if (!dev->is_in_flip)
+			val |= LVDS_ENABLE_CAPTURE_RV1106;
 		rkcif_write_register(dev, get_reg_index_of_lvds_id_ctrl0(channel->id), val);
 	}
 	if (dev->chip_id >= CHIP_RV1106_CIF)
@@ -5243,7 +5744,8 @@ static int rkcif_csi_channel_set_rv1126b(struct rkcif_stream *stream,
 		rkcif_write_register_or(dev, CIF_REG_MIPI_LVDS_INTEN,
 					CSI_START_INTEN_RK3576(channel->id));
 
-		if (priv && priv->mode.rdbk_mode >= RKISP_VICAP_RDBK_AIQ && detect_stream->is_line_wake_up) {
+		if ((!priv || priv->mode.rdbk_mode >= RKISP_VICAP_RDBK_AIQ) &&
+		    detect_stream->is_line_wake_up) {
 			rkcif_write_register_or(dev, CIF_REG_MIPI_LVDS_INTEN,
 						CSI_LINE_INTEN_RK3588(channel->id));
 			wait_line = dev->wait_line;
@@ -5295,22 +5797,25 @@ static int rkcif_csi_channel_set_rv1126b(struct rkcif_stream *stream,
 	rkcif_write_register(dev, get_reg_index_of_id_crop_start(channel->id),
 			     channel->crop_st_y << 16 | channel->crop_st_x);
 
-	if (mode == RKCIF_STREAM_MODE_CAPTURE) {
-		if (rkcif_get_interlace_mode(stream) == RKCIF_INTERLACE_SOFT_AUTO)
-			rkcif_buf_init_interlace(stream, channel->id);
-		else
-			rkcif_assign_new_buffer_pingpong(stream,
-							 RKCIF_YUV_ADDR_STATE_INIT,
-							 channel->id);
-	} else if (mode == RKCIF_STREAM_MODE_TOISP ||
-		 mode == RKCIF_STREAM_MODE_TOISP_RDBK) {
-		rkcif_assign_new_buffer_pingpong_toisp(stream,
-						       RKCIF_YUV_ADDR_STATE_INIT,
-						       channel->id);
-	} else if (mode == RKCIF_STREAM_MODE_ROCKIT) {
-		rkcif_assign_new_buffer_pingpong_rockit(stream,
-							RKCIF_YUV_ADDR_STATE_INIT,
-							channel->id);
+	if (!(capture_info->mode == RKMODULE_MULTI_DEV_COMBINE_ONE &&
+	      index < capture_info->multi_dev.dev_num - 1)) {
+		if (mode == RKCIF_STREAM_MODE_CAPTURE) {
+			if (rkcif_get_interlace_mode(stream) == RKCIF_INTERLACE_SOFT_AUTO)
+				rkcif_buf_init_interlace(stream, channel->id);
+			else
+				rkcif_assign_new_buffer_pingpong(stream,
+								 RKCIF_YUV_ADDR_STATE_INIT,
+								 channel->id);
+		} else if (mode == RKCIF_STREAM_MODE_TOISP ||
+			 mode == RKCIF_STREAM_MODE_TOISP_RDBK) {
+			rkcif_assign_new_buffer_pingpong_toisp(stream,
+							       RKCIF_YUV_ADDR_STATE_INIT,
+							       channel->id);
+		} else if (mode == RKCIF_STREAM_MODE_ROCKIT) {
+			rkcif_assign_new_buffer_pingpong_rockit(stream,
+								RKCIF_YUV_ADDR_STATE_INIT,
+								channel->id);
+		}
 	}
 
 	if (capture_info->mode == RKMODULE_MULTI_DEV_COMBINE_ONE &&
@@ -5319,19 +5824,6 @@ static int rkcif_csi_channel_set_rv1126b(struct rkcif_stream *stream,
 		rkcif_write_register(dev, get_reg_index_of_id_crop_start(channel->id),
 				     channel->crop_st_y << 16 |
 				     (channel->crop_st_x + capture_info->multi_dev.pixel_offset));
-
-	if (!(capture_info->mode == RKMODULE_MULTI_DEV_COMBINE_ONE &&
-	      index < capture_info->multi_dev.dev_num - 1)) {
-		if (mode == RKCIF_STREAM_MODE_CAPTURE)
-			rkcif_assign_new_buffer_pingpong(stream,
-						 RKCIF_YUV_ADDR_STATE_INIT,
-						 channel->id);
-		else if (mode == RKCIF_STREAM_MODE_TOISP ||
-			 mode == RKCIF_STREAM_MODE_TOISP_RDBK)
-			rkcif_assign_new_buffer_pingpong_toisp(stream,
-						       RKCIF_YUV_ADDR_STATE_INIT,
-						       channel->id);
-	}
 
 	val = channel->virtual_width;
 	if (dev->sditf[0] &&
@@ -5383,7 +5875,7 @@ static int rkcif_csi_channel_set_rv1126b(struct rkcif_stream *stream,
 	val = channel->vc | channel->data_type << 4;
 
 	if (stream->cifdev->hdr.hdr_mode == NO_HDR ||
-	    stream->cifdev->hdr.hdr_mode == HDR_COMPR)
+	    stream->cifdev->hdr.hdr_mode == HDR_CIS_MERGE)
 		val |= CSI_NO_HDR >> 10;
 	else if (stream->cifdev->hdr.hdr_mode == HDR_X2)
 		val |= CSI_HDR2 >> 10;
@@ -5474,6 +5966,9 @@ static int rkcif_csi_stream_start(struct rkcif_stream *stream, unsigned int mode
 		stream->is_wait_single_cap = false;
 		stream->last_frame_idx = 0;
 		stream->frame_phase_cache = CIF_CSI_FRAME1_READY;
+		stream->buf_replace_cnt = 0;
+		stream->to_stop_dma = 0;
+		stream->is_detect_lack_buf = true;
 	}
 	stream->interlaced_bad_frame = false;
 	stream->last_fs_interlaced_phase = 0;
@@ -5494,6 +5989,7 @@ static int rkcif_csi_stream_start(struct rkcif_stream *stream, unsigned int mode
 	rkcif_csi_channel_init(stream, channel);
 
 	if (dev->channels[0].capture_info.mode == RKMODULE_ONE_CH_TO_MULTI_ISP) {
+		stream = &dev->stream[isp_num - atomic_read(&p->stream_cnt) - 1];
 		if (atomic_read(&p->stream_cnt) < isp_num - 1)
 			goto one_to_multi_skip;
 		else
@@ -5535,6 +6031,10 @@ static int rkcif_csi_stream_start(struct rkcif_stream *stream, unsigned int mode
 					else
 						rkcif_csi_channel_set_rv1126b(stream, channel, mbus_type, mode, 0);
 				}
+				if (dev->switch_info.is_use_switch)
+					v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+						 "%s %d, switch inc cnt %d\n", __func__, __LINE__,
+						 atomic_read(&dev->hw_dev->switch_stream_cnt[dev->switch_info.host_idx]));
 			}
 		}
 	} else {
@@ -5588,6 +6088,9 @@ static void rkcif_stream_stop(struct rkcif_stream *stream)
 			stream->dma_en = 0;
 			return;
 		}
+		v4l2_dbg(5, rkcif_debug, &cif_dev->v4l2_dev,
+			 "%s %d, switch dec cnt %d\n", __func__, __LINE__,
+			 atomic_read(&cif_dev->hw_dev->switch_stream_cnt[cif_dev->switch_info.host_idx]));
 	}
 
 	if (mbus_cfg->type == V4L2_MBUS_CSI2_DPHY ||
@@ -5964,6 +6467,19 @@ static void rkcif_add_fence_to_vb_done(struct rkcif_stream *stream,
 	struct v4l2_device *v4l2_dev = &cif_dev->v4l2_dev;
 
 	spin_lock_irqsave(&stream->fence_lock, lock_flags);
+
+	/* signal old fence if exists (previous frame not signaled yet) */
+	if (stream->rkcif_fence) {
+		v4l2_dbg(2, rkcif_debug, v4l2_dev, "%s: signal old fence:%p, fd:%d\n",
+			__func__, stream->rkcif_fence->fence,
+			stream->rkcif_fence->fence_fd);
+		dma_fence_signal(stream->rkcif_fence->fence);
+		dma_fence_put(stream->rkcif_fence->fence);
+		kfree(stream->rkcif_fence);
+		stream->rkcif_fence = NULL;
+	}
+
+	/* get new fence from qbuf list */
 	if (!list_empty(&stream->qbuf_fence_list_head)) {
 		vb_fence = list_first_entry(&stream->qbuf_fence_list_head,
 					    struct rkcif_fence, fence_list);
@@ -5972,11 +6488,8 @@ static void rkcif_add_fence_to_vb_done(struct rkcif_stream *stream,
 		vb_fence = NULL;
 	}
 
-	if (vb_fence)
-		list_add_tail(&vb_fence->fence_list, &stream->done_fence_list_head);
-	spin_unlock_irqrestore(&stream->fence_lock, lock_flags);
-
 	if (vb_fence) {
+		stream->rkcif_fence = vb_fence;
 		/*  pass the fence_fd to userspace through timecode.userbits */
 		vb_done->timecode.userbits[0] = vb_fence->fence_fd & 0xff;
 		vb_done->timecode.userbits[1] = (vb_fence->fence_fd & 0xff00) >> 8;
@@ -5989,41 +6502,7 @@ static void rkcif_add_fence_to_vb_done(struct rkcif_stream *stream,
 		memset(vb_done->timecode.userbits, 0xff, sizeof(vb_done->timecode.userbits));
 		v4l2_err(v4l2_dev, "%s: failed to get fence fd!\n", __func__);
 	}
-}
-
-static void rkcif_dqbuf_get_done_fence(struct rkcif_stream *stream)
-{
-	unsigned long lock_flags = 0;
-	struct rkcif_fence *done_fence;
-	struct v4l2_device *v4l2_dev = &stream->cifdev->v4l2_dev;
-
-	spin_lock_irqsave(&stream->fence_lock, lock_flags);
-	if (!list_empty(&stream->done_fence_list_head)) {
-		done_fence = list_first_entry(&stream->done_fence_list_head,
-				struct rkcif_fence, fence_list);
-		list_del(&done_fence->fence_list);
-	} else {
-		done_fence = NULL;
-	}
 	spin_unlock_irqrestore(&stream->fence_lock, lock_flags);
-
-	if (done_fence) {
-		spin_lock_irqsave(&stream->fence_lock, lock_flags);
-		if (stream->rkcif_fence) {
-			dma_fence_signal(stream->rkcif_fence->fence);
-			dma_fence_put(stream->rkcif_fence->fence);
-			v4l2_dbg(2, rkcif_debug, v4l2_dev, "%s: signal fence:%p, old_fd:%d\n",
-				 __func__,
-				 stream->rkcif_fence->fence,
-				 stream->rkcif_fence->fence_fd);
-			kfree(stream->rkcif_fence);
-			stream->rkcif_fence = NULL;
-		}
-		stream->rkcif_fence = done_fence;
-		spin_unlock_irqrestore(&stream->fence_lock, lock_flags);
-		v4l2_dbg(3, rkcif_debug, v4l2_dev, "%s: fence:%p, fence_fd:%d\n",
-			 __func__, done_fence->fence, done_fence->fence_fd);
-	}
 }
 
 static void rkcif_fence_signal(struct rkcif_stream *stream)
@@ -6048,7 +6527,7 @@ static void rkcif_fence_signal(struct rkcif_stream *stream)
 static void rkcif_free_fence(struct rkcif_stream *stream)
 {
 	unsigned long lock_flags = 0;
-	struct rkcif_fence *vb_fence, *done_fence;
+	struct rkcif_fence *vb_fence;
 	struct v4l2_device *v4l2_dev = &stream->cifdev->v4l2_dev;
 	struct files_struct *files = current->files;
 	LIST_HEAD(local_list);
@@ -6076,23 +6555,6 @@ static void rkcif_free_fence(struct rkcif_stream *stream)
 			close_fd(vb_fence->fence_fd);
 		}
 		kfree(vb_fence);
-	}
-
-	spin_lock_irqsave(&stream->fence_lock, lock_flags);
-	list_replace_init(&stream->done_fence_list_head, &local_list);
-	spin_unlock_irqrestore(&stream->fence_lock, lock_flags);
-
-	while (!list_empty(&local_list)) {
-		done_fence = list_first_entry(&local_list, struct rkcif_fence, fence_list);
-		list_del(&done_fence->fence_list);
-		v4l2_dbg(2, rkcif_debug, v4l2_dev, "%s: free done_fence fd:%d\n",
-			 __func__, done_fence->fence_fd);
-		dma_fence_put(done_fence->fence);
-		if (files) {
-			put_unused_fd(done_fence->fence_fd);
-			close_fd(done_fence->fence_fd);
-		}
-		kfree(done_fence);
 	}
 }
 
@@ -6260,6 +6722,13 @@ void rkcif_buf_queue(struct vb2_buffer *vb)
 			cifbuf->buff_addr[i + 1] = cifbuf->buff_addr[i] +
 				pixm->plane_fmt[i].bytesperline * pixm->height;
 	}
+	if (stream->is_single_buf_mode && stream->state == RKCIF_STATE_STREAMING) {
+		spin_lock_irqsave(&stream->vbq_lock, flags);
+		stream->curr_buf = cifbuf;
+		stream->next_buf = cifbuf;
+		spin_unlock_irqrestore(&stream->vbq_lock, flags);
+		return;
+	}
 	spin_lock_irqsave(&stream->vbq_lock, flags);
 	list_add_tail(&cifbuf->queue, &stream->buf_head);
 	cifbuf->id = stream->id;
@@ -6349,7 +6818,6 @@ void rkcif_free_rx_buf(struct rkcif_stream *stream, int buf_num)
 						 RKISP_VICAP_CMD_RX_BUFFER_FREE, &buf->dbufs);
 			rkcif_free_reserved_mem_buf(dev, buf);
 			memset(buf, 0, sizeof(*buf));
-			buf->dummy.is_free = true;
 		}
 
 		if (IS_ENABLED(CONFIG_VIDEO_ROCKCHIP_THUNDER_BOOT_ISP)) {
@@ -6373,6 +6841,10 @@ void rkcif_free_rx_buf(struct rkcif_stream *stream, int buf_num)
 			free_reserved_area(phys_to_virt(resmem_free_start),
 					   phys_to_virt(resmem_free_end),
 					   -1, "rkisp_thunderboot");
+			v4l2_info(&stream->cifdev->v4l2_dev,
+				  "free_reserved_area done: start=0x%x, end=0x%x, pages=%llu\n",
+				  (u32)resmem_free_start, (u32)resmem_free_end,
+				  (unsigned long long)(resmem_free_end - resmem_free_start) / PAGE_SIZE);
 			if (dev->is_rtt_suspend)
 				dev->resmem_size = rtt_min_size;
 			else
@@ -6380,7 +6852,6 @@ void rkcif_free_rx_buf(struct rkcif_stream *stream, int buf_num)
 		}
 		atomic_set(&stream->buf_cnt, 0);
 		stream->total_buf_num = 0;
-		stream->rx_buf_num = 0;
 
 		return;
 	}
@@ -6394,12 +6865,69 @@ void rkcif_free_rx_buf(struct rkcif_stream *stream, int buf_num)
 	spin_lock_irqsave(&dev->buffree_lock, flags);
 	for (i = 0; i < buf_num; i++) {
 		buf = &stream->rx_buf[i];
-		if (buf->dummy.is_free)
+		if (!buf->dummy.is_allocated)
 			continue;
-		if (stream->is_m_online_fb_res && buf == stream->last_buf_toisp) {
-			/* todo, release left buf*/
+		if (IS_ENABLED(CONFIG_VIDEO_ROCKCHIP_THUNDER_BOOT_ISP) &&
+		    stream->is_m_online_fb_res && buf == stream->last_buf_toisp) {
+			struct csi_channel_info *channel = &dev->channels[0];
+			u32 right_half_size = channel->virtual_width * channel->height;
+			phys_addr_t free_start, free_end;
+			phys_addr_t aligned_start, aligned_end;
+
+			/* Release the reserved memory of the second half of the buffer.
+			 * The buffer was originally allocated for full frame size,
+			 * now we only need the right half size as reconfigured by
+			 * rkcif_reinit_right_half_config.
+			 *
+			 * Use free_reserved_area to free the second half memory,
+			 * and update buf->shmem.shm_size so that when the program
+			 * exits, rkcif_free_reserved_mem_buf can correctly free
+			 * the remaining first half memory.
+			 *
+			 * IMPORTANT: Both free_start and free_end must be page-aligned
+			 * to avoid memory leaks. free_reserved_area() internally aligns
+			 * start up and end down to page boundaries, so we must ensure
+			 * the freed range has proper page-aligned boundaries.
+			 */
+			if (buf->shmem.shm_size > right_half_size) {
+				free_start = buf->shmem.shm_start + right_half_size;
+				free_end = buf->shmem.shm_start + buf->shmem.shm_size;
+
+				/* Align start up and end down to page boundaries */
+				aligned_start = PAGE_ALIGN(free_start);
+				aligned_end = free_end & PAGE_MASK;
+
+				/* Only free if there's at least one page to release */
+				if (aligned_end > aligned_start) {
+					free_reserved_area(phys_to_virt(aligned_start),
+							   phys_to_virt(aligned_end),
+							   -1, "rkisp_thunderboot");
+					v4l2_info(&dev->v4l2_dev,
+						  "stream[%d] free right half done: orig_start=0x%pa orig_end=0x%pa aligned_start=0x%pa aligned_end=0x%pa pages=%llu\n",
+						  stream->id, &free_start, &free_end,
+						  &aligned_start, &aligned_end,
+						  (unsigned long long)(aligned_end - aligned_start) / PAGE_SIZE);
+				} else {
+					v4l2_info(&dev->v4l2_dev,
+						  "stream[%d] right half: no pages to free (aligned_end <= aligned_start)\n",
+						  stream->id);
+				}
+
+				/*
+				 * Update shm_size to the page-aligned right_half_size
+				 * to ensure the second free in rkcif_free_reserved_mem_buf
+				 * is also page-aligned.
+				 */
+				buf->shmem.shm_size = PAGE_ALIGN(right_half_size);
+				buf->dummy.size = buf->shmem.shm_size;
+			}
 			stream->is_m_online_fb_res = false;
-			list_add_tail(&buf->list, &stream->rx_buf_head);
+			v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "_%d_ stream[%d] add 0x%x to list %p\n",
+				 __LINE__, stream->id, (u32)buf->dummy.dma_addr, &stream->rx_buf_head);
+			if (!buf->in_rx_list) {
+				list_add_tail(&buf->list, &stream->rx_buf_head);
+				buf->in_rx_list = true;
+			}
 			continue;
 		}
 		if (buf->dbufs.is_init)
@@ -6408,14 +6936,12 @@ void rkcif_free_rx_buf(struct rkcif_stream *stream, int buf_num)
 		if (!dev->is_thunderboot) {
 			rkcif_free_buffer(dev, &buf->dummy);
 			memset(buf, 0, sizeof(*buf));
-			buf->dummy.is_free = true;
 		} else {
 			list_add_tail(&buf->list_free, &priv->buf_free_list);
 		}
 		atomic_dec(&stream->buf_cnt);
 		stream->total_buf_num--;
 	}
-	stream->rx_buf_num = 0;
 
 	spin_unlock_irqrestore(&dev->buffree_lock, flags);
 
@@ -6424,7 +6950,7 @@ void rkcif_free_rx_buf(struct rkcif_stream *stream, int buf_num)
 
 	stream->dma_en &= ~RKCIF_DMAEN_BY_ISP;
 	v4l2_dbg(1, rkcif_debug, &stream->cifdev->v4l2_dev,
-		 "free rx_buf, buf_num %d\n", buf_num);
+		 "stream[%d] free rx_buf, buf_num %d\n", stream->id, buf_num);
 }
 
 static void rkcif_sync_crop_info(struct rkcif_stream *stream);
@@ -6464,6 +6990,7 @@ int rkcif_init_rx_buf(struct rkcif_stream *stream, int buf_num)
 	int j = 0;
 	int ret = 0;
 	bool is_match_pre = false;
+	bool is_switch = false;
 
 	if (!priv)
 		return -EINVAL;
@@ -6498,9 +7025,12 @@ int rkcif_init_rx_buf(struct rkcif_stream *stream, int buf_num)
 	while (true) {
 		buf = &stream->rx_buf[i];
 		memset(buf, 0, sizeof(*buf));
+		INIT_LIST_HEAD(&buf->list);
+		INIT_LIST_HEAD(&buf->list_tool);
+		INIT_LIST_HEAD(&buf->list_free);
 		dummy = &buf->dummy;
 		if (priv->mode.rdbk_mode == RKISP_VICAP_ONLINE_UNITE &&
-		    (priv->hdr_cfg.hdr_mode == NO_HDR || priv->hdr_cfg.hdr_mode == HDR_COMPR ||
+		    (priv->hdr_cfg.hdr_mode == NO_HDR || priv->hdr_cfg.hdr_mode == HDR_CIS_MERGE ||
 		     (priv->hdr_cfg.hdr_mode == HDR_X2 && stream->id == 1) ||
 		     (priv->hdr_cfg.hdr_mode == HDR_X3 && stream->id == 2)))
 			dummy->size = rkcif_get_right_half_buf_size(stream);
@@ -6514,25 +7044,33 @@ int rkcif_init_rx_buf(struct rkcif_stream *stream, int buf_num)
 			if (i == 0)
 				rkcif_get_resmem_head(dev);
 			buf->buf_idx = i;
-			ret = rkcif_alloc_reserved_mem_buf(dev, buf);
+			if (!is_switch)
+				ret = rkcif_alloc_reserved_mem_buf(dev, buf);
+			else
+				ret = rkcif_alloc_reserved_mem_buf(dev->switch_info.switch_dev, buf);
 			if (ret) {
-				stream->rx_buf_num = i;
-				v4l2_info(&dev->v4l2_dev,
-					 "reserved mem support alloc buf num %d, require buf num %d\n",
-					 i, buf_num);
-				break;
+				if (!is_switch && dev->switch_info.is_use_switch) {
+					is_switch = true;
+					continue;
+				} else {
+					stream->rx_buf_num = i;
+					v4l2_info(&dev->v4l2_dev,
+						  "reserved mem support alloc buf num %d, require buf num %d\n",
+						  i, buf_num);
+					break;
+				}
 			}
 			if (dev->rdbk_debug)
 				v4l2_info(&dev->v4l2_dev,
-					  "stream[%d] buf addr 0x%llx\n",
-					  stream->id, (u64)dummy->dma_addr);
+					  "stream[%d] buf addr 0x%llx, buf %p\n",
+					  stream->id, (u64)dummy->dma_addr, buf);
 		} else {
 			ret = rkcif_alloc_buffer(dev, dummy);
 			if (ret) {
 				stream->rx_buf_num = i;
 				v4l2_info(&dev->v4l2_dev,
-					 "alloc buf num %d, require buf num %d\n",
-					 i, buf_num);
+					  "alloc buf num %d, require buf num %d\n",
+					  i, buf_num);
 				break;
 			}
 			buf->dbufs.dbuf = dummy->dbuf;
@@ -6555,9 +7093,14 @@ int rkcif_init_rx_buf(struct rkcif_stream *stream, int buf_num)
 				}
 			}
 		}
-		if (!is_match_pre)
-			list_add_tail(&buf->list, &stream->rx_buf_head);
-		dummy->is_free = false;
+		if (!is_match_pre) {
+			v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev, "_%d_ stream[%d] add 0x%x to list %p\n",
+				 __LINE__, stream->id, (u32)buf->dummy.dma_addr, &stream->rx_buf_head);
+			if (!buf->in_rx_list) {
+				list_add_tail(&buf->list, &stream->rx_buf_head);
+				buf->in_rx_list = true;
+			}
+		}
 		if (stream->is_compact)
 			buf->dbufs.is_uncompact = false;
 		else
@@ -6619,6 +7162,11 @@ static int rkcif_create_dummy_buf(struct rkcif_stream *stream)
 					    fie.code == MEDIA_BUS_FMT_BGR888_1X24 ||
 					    fie.code == MEDIA_BUS_FMT_GBR888_1X24)
 						size = fie.width * fie.height * 3;
+					else if (fie.code == MEDIA_BUS_FMT_UYVY10_2X10 ||
+						 fie.code == MEDIA_BUS_FMT_VYUY10_2X10 ||
+						 fie.code == MEDIA_BUS_FMT_YUYV10_2X10 ||
+						 fie.code == MEDIA_BUS_FMT_YVYU10_2X10)
+						size = fie.width * fie.height * 4;
 					else
 						size = fie.width * fie.height * 2;
 					v4l2_dbg(1, rkcif_debug, &dev->v4l2_dev,
@@ -6644,6 +7192,11 @@ static int rkcif_create_dummy_buf(struct rkcif_stream *stream)
 			    fmt.format.code == MEDIA_BUS_FMT_BGR888_1X24 ||
 			    fmt.format.code == MEDIA_BUS_FMT_GBR888_1X24)
 				size = fmt.format.width  * fmt.format.height * 3;
+			else if (fmt.format.code == MEDIA_BUS_FMT_UYVY10_2X10 ||
+				 fmt.format.code == MEDIA_BUS_FMT_VYUY10_2X10 ||
+				 fmt.format.code == MEDIA_BUS_FMT_YUYV10_2X10 ||
+				 fmt.format.code == MEDIA_BUS_FMT_YVYU10_2X10)
+				size = fmt.format.width * fmt.format.height * 4;
 			else
 				size = fmt.format.width * fmt.format.height * 2;
 			if (size > max_size)
@@ -6673,7 +7226,7 @@ static void rkcif_destroy_dummy_buf(struct rkcif_stream *stream)
 	struct rkcif_device *dev = stream->cifdev;
 	struct rkcif_dummy_buffer *dummy_buf = &dev->hw_dev->dummy_buf;
 
-	if (dummy_buf->vaddr)
+	if (dummy_buf->is_allocated)
 		rkcif_free_buffer(dev, dummy_buf);
 	dummy_buf->dma_addr = 0;
 	dummy_buf->vaddr = NULL;
@@ -6890,6 +7443,7 @@ static void rkcif_clean_state_one_to_multi_mode(struct rkcif_device *dev)
 					gain = NULL;
 				}
 			}
+			priv->effect_exp_cnt = 0;
 		}
 	}
 	while (!list_empty(&dev->effect_time_head)) {
@@ -6909,6 +7463,18 @@ static void rkcif_clean_state_one_to_multi_mode(struct rkcif_device *dev)
 			kfree(effect_gain);
 			effect_gain = NULL;
 		}
+	}
+}
+
+static void rkcif_clean_state_quadbayer_to_dual_pipe_mode(struct rkcif_device *dev)
+{
+	struct sditf_priv *priv = NULL;
+	int i = 0;
+
+	for (i = 0; i < dev->sditf_cnt; i++) {
+		priv = dev->sditf[i];
+		if (priv)
+			atomic_set(&priv->frm_sync_seq, 0);
 	}
 }
 
@@ -6937,11 +7503,19 @@ void rkcif_do_stop_stream(struct rkcif_stream *stream,
 	else
 		mutex_lock(&dev->stream_lock);
 
+	if (stream->cifdev->channels[0].capture_info.mode == RKMODULE_ONE_CH_TO_MULTI_ISP) {
+		stream = &stream->cifdev->stream[atomic_read(&stream->cifdev->pipe.stream_cnt) - 1];
+		node = &stream->vnode;
+		v4l2_dbg(3, rkcif_debug, &dev->v4l2_dev,
+			 "stream[%d] pipe stream_cnt %d\n",
+			 stream->id, atomic_read(&stream->cifdev->pipe.stream_cnt));
+	}
+
 	v4l2_info(&dev->v4l2_dev, "stream[%d] start stopping, total mode 0x%x, cur 0x%x\n",
 		stream->id, stream->cur_stream_mode, mode);
 
 	if (mode == stream->cur_stream_mode) {
-		if (stream->dma_en) {
+		if (!stream->is_pause_stream) {
 			if (!dev->sensor_linetime)
 				dev->sensor_linetime = rkcif_get_linetime(stream);
 			vblank = rkcif_get_sensor_vblank(dev);
@@ -6961,12 +7535,16 @@ void rkcif_do_stop_stream(struct rkcif_stream *stream,
 			} else {
 				stream->stopping = true;
 			}
-		} else if (dev->sditf[0] && (!dev->sditf[0]->is_toisp_off)) {
+		} else if ((dev->sditf[0] && (!dev->sditf[0]->is_toisp_off)) ||
+			(stream->cifdev->channels[0].capture_info.mode == RKMODULE_ONE_CH_TO_MULTI_ISP && stream->id != 0)) {
 			stream->stopping = true;
 		} else {
 			rkcif_stream_stop(stream);
 		}
 		if (stream->stopping == true) {
+			v4l2_dbg(3, rkcif_debug, &dev->v4l2_dev,
+				 "stream[%d] need wait stream stop\n",
+				 stream->id);
 			if (mode == RKCIF_STREAM_MODE_TOISP && dev->sditf[0]->is_toisp_off)
 				ret = 0;
 			else
@@ -6980,14 +7558,16 @@ void rkcif_do_stop_stream(struct rkcif_stream *stream,
 		}
 
 		video_device_pipeline_stop(&node->vdev);
-		if (is_deserializer_name(dev->terminal_sensor.sd->name)) {
+		if (is_deserializer_name(dev->terminal_sensor.sd)) {
 			ch_stream.channel = stream->id;
 			ch_stream.enable = 0;
 			if (v4l2_subdev_call(dev->terminal_sensor.sd,
 			    core, ioctl, RKMODULE_SET_CHANNEL_STREAM, &ch_stream))
 				v4l2_info(&dev->v4l2_dev, "stream[%d] serdes failed to stream off single channel\n", stream->id);
 		}
-		if (dev->is_camera_over_bridge) {
+		if (dev->is_camera_over_bridge &&
+		    dev->sditf[stream->id] &&
+		    dev->sditf[stream->id]->sensor_sd) {
 			ret = v4l2_subdev_call(dev->sditf[stream->id]->sensor_sd,
 					       video,
 					       s_stream,
@@ -7001,7 +7581,7 @@ void rkcif_do_stop_stream(struct rkcif_stream *stream,
 			v4l2_err(v4l2_dev, "pipeline stream-off failed error:%d\n",
 				 ret);
 
-		dev->is_start_hdr = false;
+		WRITE_ONCE(dev->is_start_hdr, false);
 		stream->is_dvp_yuv_addr_init = false;
 		if (stream->skip_info.skip_en) {
 			stream->skip_info.skip_en = false;
@@ -7026,6 +7606,9 @@ void rkcif_do_stop_stream(struct rkcif_stream *stream,
 	if (!atomic_read(&dev->pipe.stream_cnt) &&
 	    dev->channels[0].capture_info.mode == RKMODULE_ONE_CH_TO_MULTI_ISP)
 		rkcif_clean_state_one_to_multi_mode(dev);
+	if (!atomic_read(&dev->pipe.stream_cnt) &&
+	    dev->channels[0].capture_info.mode == RKMODULE_QUADBAYER_TO_DUAL_PIPE)
+		rkcif_clean_state_quadbayer_to_dual_pipe_mode(dev);
 	if (dev->channels[0].capture_info.mode == RKMODULE_MULTI_CH_TO_MULTI_ISP &&
 	    dev->sditf[stream->id])
 		atomic_set(&dev->sditf[stream->id]->frm_sync_seq, 0);
@@ -7091,7 +7674,7 @@ void rkcif_do_stop_stream(struct rkcif_stream *stream,
 				break;
 			}
 		}
-		if (can_reset && hw_dev->dummy_buf.vaddr)
+		if (can_reset && hw_dev->dummy_buf.is_allocated)
 			rkcif_destroy_dummy_buf(stream);
 		if (dev->chip_id >= CHIP_RK3588_CIF)
 			mutex_unlock(&hw_dev->dev_lock);
@@ -7113,6 +7696,7 @@ void rkcif_do_stop_stream(struct rkcif_stream *stream,
 			dev->is_in_flip = false;
 			dev->pre_buf_num = 0;
 			dev->hw_dev->is_in_reset = false;
+			dev->prev_id = 0;
 		}
 		if (atomic_read(&dev->pipe.stream_cnt) == 0)
 			atomic_set(&stream->sub_stream_buf_cnt, 0);
@@ -7128,7 +7712,9 @@ void rkcif_do_stop_stream(struct rkcif_stream *stream,
 		}
 		stream->crop_enable = false;
 		stream->crop_mask = 0;
-		stream->frame_loss = 0;
+		stream->frame_loss_fs_no_fe = 0;
+		stream->frame_loss_fe_no_out = 0;
+		stream->frame_out_cnt = 0;
 		stream->is_fb_first_frame = true;
 		stream->is_force_update = false;
 	}
@@ -7476,10 +8062,10 @@ static u32 rkcif_align_bits_per_pixel(struct rkcif_stream *stream,
 		case V4L2_PIX_FMT_SGBRG14:
 		case V4L2_PIX_FMT_SBGGR14:
 			if (stream->cifdev->chip_id < CHIP_RV1126_CIF) {
-				bpp = max(fmt->bpp[plane_index], (u8)CIF_RAW_STORED_BIT_WIDTH);
+				bpp = max_t(u8, fmt->bpp[plane_index], (u8)CIF_RAW_STORED_BIT_WIDTH);
 				cal = CIF_RAW_STORED_BIT_WIDTH;
 			} else {
-				bpp = max(fmt->bpp[plane_index], (u8)CIF_RAW_STORED_BIT_WIDTH_RV1126);
+				bpp = max_t(u8, fmt->bpp[plane_index], (u8)CIF_RAW_STORED_BIT_WIDTH_RV1126);
 				cal = CIF_RAW_STORED_BIT_WIDTH_RV1126;
 			}
 			for (i = 1; i < 5; i++) {
@@ -7489,6 +8075,21 @@ static u32 rkcif_align_bits_per_pixel(struct rkcif_stream *stream,
 				}
 			}
 			break;
+		case V4L2_PIX_FMT_Y210:
+			if (stream->cifdev->chip_id < CHIP_RV1126_CIF) {
+				bpp = max_t(u8, fmt->bpp[plane_index], (u8)CIF_RAW_STORED_BIT_WIDTH) * 2;
+				cal = CIF_RAW_STORED_BIT_WIDTH;
+			} else {
+				bpp = max_t(u8, fmt->bpp[plane_index], (u8)CIF_RAW_STORED_BIT_WIDTH_RV1126) * 2;
+				cal = CIF_RAW_STORED_BIT_WIDTH_RV1126;
+			}
+			for (i = 1; i < 5; i++) {
+				if (i * cal >= bpp) {
+					bpp = i * cal;
+					break;
+				}
+			}
+		break;
 		default:
 			v4l2_err(&stream->cifdev->v4l2_dev, "fourcc: %d is not supported!\n",
 				 fmt->fourcc);
@@ -7578,7 +8179,7 @@ static int rkcif_sanity_check_fmt(struct rkcif_stream *stream,
 	if (dev->terminal_sensor.sd) {
 		stream->cif_fmt_in = rkcif_get_input_fmt(dev,
 							 &input, stream->id,
-							 &dev->channels[stream->id]);
+							 &stream->channel_info);
 		if (!stream->cif_fmt_in) {
 			v4l2_err(v4l2_dev, "Input fmt is invalid\n");
 			return -EINVAL;
@@ -7587,6 +8188,7 @@ static int rkcif_sanity_check_fmt(struct rkcif_stream *stream,
 		v4l2_err(v4l2_dev, "terminal_sensor is invalid\n");
 		return -EINVAL;
 	}
+	dev->channels[0] = dev->stream[0].channel_info;
 
 	if (stream->cif_fmt_in->mbus_code == MEDIA_BUS_FMT_EBD_1X8 ||
 		stream->cif_fmt_in->mbus_code == MEDIA_BUS_FMT_SPD_2X8) {
@@ -7787,6 +8389,7 @@ static int rkcif_dvp_get_output_type_mask(struct rkcif_stream *stream)
 	case V4L2_PIX_FMT_Y10:
 	case V4L2_PIX_FMT_Y12:
 	case V4L2_PIX_FMT_Y14:
+	case V4L2_PIX_FMT_Y210:
 		if (stream->is_compact)
 			mask = CSI_WRDDR_TYPE_RAW_COMPACT << 11;
 		else
@@ -7870,6 +8473,7 @@ static int rkcif_dvp_get_output_type_mask_rk3576(struct rkcif_stream *stream)
 	case V4L2_PIX_FMT_SGRBG14:
 	case V4L2_PIX_FMT_SGBRG14:
 	case V4L2_PIX_FMT_SBGGR14:
+	case V4L2_PIX_FMT_Y210:
 		if (stream->is_compact)
 			mask = CSI_WRDDR_TYPE_RAW_COMPACT << 15;
 		else
@@ -7922,6 +8526,7 @@ static int rkcif_stream_start(struct rkcif_stream *stream, unsigned int mode)
 		stream->is_change_toisp = false;
 		stream->last_frame_idx = 0;
 		stream->frame_phase_cache = CIF_CSI_FRAME1_READY;
+		stream->is_detect_lack_buf = true;
 	}
 
 	sensor_info = dev->active_sensor;
@@ -8662,6 +9267,7 @@ int rkcif_do_start_stream(struct rkcif_stream *stream, enum rkcif_stream_mode mo
 	u32 skip_frame = 0;
 	int on = 1;
 	struct rkmodule_channel_stream ch_stream;
+	u32 exp_mode;
 
 	v4l2_info(&dev->v4l2_dev, "stream[%d] start streaming\n", stream->id);
 
@@ -8722,6 +9328,20 @@ int rkcif_do_start_stream(struct rkcif_stream *stream, enum rkcif_stream_mode mo
 			rkmodule_stream_seq = RKMODULE_START_STREAM_DEFAULT;
 
 		rkcif_sync_crop_info(stream);
+		ret = v4l2_subdev_call(terminal_sensor->sd,
+				       core, ioctl,
+				       RKMODULE_GET_EXP_MODE,
+				       &exp_mode);
+		if (ret) {
+			if (dev->hdr.hdr_mode == HDR_X2)
+				dev->exp_mode = EXP_HDR2_STA;
+			else if (dev->hdr.hdr_mode == HDR_X3)
+				dev->exp_mode = EXP_HDR3_STA;
+			else
+				dev->exp_mode = EXP_NORMAL;
+		} else {
+			dev->exp_mode = exp_mode;
+		}
 	}
 
 	ret = rkcif_sanity_check_fmt(stream, NULL);
@@ -8767,7 +9387,7 @@ int rkcif_do_start_stream(struct rkcif_stream *stream, enum rkcif_stream_mode mo
 		mutex_lock(&hw_dev->dev_lock);
 	if (((dev->active_sensor && dev->active_sensor->mbus.type == V4L2_MBUS_BT656) ||
 	     dev->is_use_dummybuf) &&
-	    (!dev->hw_dev->dummy_buf.vaddr) &&
+	    (!dev->hw_dev->dummy_buf.is_allocated) &&
 	    mode == RKCIF_STREAM_MODE_CAPTURE) {
 		ret = rkcif_create_dummy_buf(stream);
 		if (ret < 0) {
@@ -8842,6 +9462,11 @@ int rkcif_do_start_stream(struct rkcif_stream *stream, enum rkcif_stream_mode mo
 				stream->exp_delay.dcg_delay = 1;
 			}
 		}
+		if (dev->switch_info.is_use_switch && dev->sync_cfg.type == INTERNAL_MASTER_MODE) {
+			dev->switch_info.is_active = true;
+			dev->switch_info.switch_dev->switch_info.is_active = false;
+			rkcif_switch_change(dev, !!dev->switch_info.gpio_val);
+		}
 	}
 	if (dev->chip_id >= CHIP_RK1808_CIF) {
 		if (dev->active_sensor &&
@@ -8883,7 +9508,9 @@ int rkcif_do_start_stream(struct rkcif_stream *stream, enum rkcif_stream_mode mo
 			if (ret < 0)
 				goto stop_stream;
 		}
-		if (dev->is_camera_over_bridge) {
+		if (dev->is_camera_over_bridge &&
+		    dev->sditf[stream->id] &&
+		    dev->sditf[stream->id]->sensor_sd) {
 			ret = v4l2_subdev_call(dev->sditf[stream->id]->sensor_sd,
 					       video,
 					       s_stream,
@@ -8891,7 +9518,7 @@ int rkcif_do_start_stream(struct rkcif_stream *stream, enum rkcif_stream_mode mo
 			if (ret < 0)
 				goto stop_stream;
 		}
-		if (is_deserializer_name(dev->terminal_sensor.sd->name)) {
+		if (is_deserializer_name(dev->terminal_sensor.sd)) {
 			ch_stream.channel = stream->id;
 			ch_stream.enable = 1;
 			if (v4l2_subdev_call(dev->terminal_sensor.sd,
@@ -9017,7 +9644,7 @@ int rkcif_set_fmt(struct rkcif_stream *stream,
 	u32 xsubs = 1, ysubs = 1, i;
 	struct rkmodule_hdr_cfg hdr_cfg;
 	struct rkcif_extend_info *extend_line = &stream->extend_line;
-	struct csi_channel_info *channel_info = &dev->channels[stream->id];
+	struct csi_channel_info *channel_info = &stream->channel_info;
 	int ret;
 	u32 raw_bpp = 0;
 	struct rkmodule_irfpa_info irfpa_info = {0};
@@ -9033,9 +9660,17 @@ int rkcif_set_fmt(struct rkcif_stream *stream,
 	input_rect.height = RKCIF_DEFAULT_HEIGHT;
 
 	if (dev->terminal_sensor.sd) {
+		if (dev->chip_id < CHIP_RK3588_CIF)
+			mutex_lock(&dev->hw_dev->dev_lock);
+		else
+			mutex_lock(&dev->stream_lock);
 		cif_fmt_in = rkcif_get_input_fmt(dev,
 						 &input_rect, stream->id,
 						 channel_info);
+		if (dev->chip_id < CHIP_RK3588_CIF)
+			mutex_unlock(&dev->hw_dev->dev_lock);
+		else
+			mutex_unlock(&dev->stream_lock);
 		stream->cif_fmt_in = cif_fmt_in;
 	} else {
 		v4l2_err(&stream->cifdev->v4l2_dev,
@@ -9140,6 +9775,16 @@ int rkcif_set_fmt(struct rkcif_stream *stream,
 			stream->is_compact = false;
 		}
 
+		if (fmt->fmt_type == CIF_FMT_TYPE_RAW &&
+		    cif_fmt_in &&
+		    (cif_fmt_in->mbus_code == MEDIA_BUS_FMT_UYVY10_2X10 ||
+		     cif_fmt_in->mbus_code == MEDIA_BUS_FMT_VYUY10_2X10 ||
+		     cif_fmt_in->mbus_code == MEDIA_BUS_FMT_YUYV10_2X10 ||
+		     cif_fmt_in->mbus_code == MEDIA_BUS_FMT_YVYU10_2X10)) {
+			stream->is_compact = false;
+			stream->is_high_align = true;
+		}
+
 		if (fmt->fmt_type == CIF_FMT_TYPE_RAW && stream->is_compact &&
 		    (dev->active_sensor->mbus.type == V4L2_MBUS_CSI2_DPHY ||
 		     dev->active_sensor->mbus.type == V4L2_MBUS_CSI2_CPHY ||
@@ -9173,7 +9818,10 @@ int rkcif_set_fmt(struct rkcif_stream *stream,
 				bpl = ALIGN(width * raw_bpp / 8, 256);
 			} else {
 				bpp = rkcif_align_bits_per_pixel(stream, fmt, i);
-				bpl = ALIGN(width * bpp / CIF_YUV_STORED_BIT_WIDTH, 8);
+				if (fmt->csi_fmt_val == CSI_WRDDR_TYPE_RGB888)
+					bpl = ALIGN_ANY_SAFE(width * bpp / CIF_YUV_STORED_BIT_WIDTH, 24);
+				else
+					bpl = ALIGN(width * bpp / CIF_YUV_STORED_BIT_WIDTH, 8);
 
 			}
 		}
@@ -9311,7 +9959,6 @@ void rkcif_stream_init(struct rkcif_device *dev, u32 id)
 	spin_lock_init(&stream->fence_lock);
 	rkcif_fence_context_init(&stream->fence_ctx);
 	INIT_LIST_HEAD(&stream->qbuf_fence_list_head);
-	INIT_LIST_HEAD(&stream->done_fence_list_head);
 	stream->low_latency = false;
 	stream->rkcif_fence = NULL;
 	stream->rounding_bit = 0;
@@ -9319,9 +9966,13 @@ void rkcif_stream_init(struct rkcif_device *dev, u32 id)
 	stream->is_fb_first_frame = true;
 	stream->frame_idx = 0;
 	memset(&stream->sensor_exp_info, 0, sizeof(stream->sensor_exp_info));
-	stream->frame_loss = 0;
+	stream->frame_loss_fs_no_fe = 0;
+	stream->frame_loss_fe_no_out = 0;
+	stream->frame_out_cnt = 0;
 	stream->is_pause_stream = false;
 	stream->is_force_update = false;
+	stream->is_hold_stream_off = false;
+	stream->is_single_buf_mode = false;
 }
 
 int rkcif_sensor_set_power(struct rkcif_stream *stream, int on)
@@ -9353,7 +10004,7 @@ int rkcif_sensor_set_power(struct rkcif_stream *stream, int on)
 						 s_power, on);
 		}
 	}
-	if (is_deserializer_name(cif_dev->terminal_sensor.sd->name)) {
+	if (is_deserializer_name(cif_dev->terminal_sensor.sd)) {
 		ch_power.channel = stream->id;
 		ch_power.enable = on;
 		if (v4l2_subdev_call(cif_dev->terminal_sensor.sd,
@@ -9571,6 +10222,7 @@ static int rkcif_enum_fmt_vid_cap_mplane(struct file *file, void *priv,
 	int i = 0;
 	int ret = 0;
 	int fource_idx = 0;
+	struct csi_channel_info	csi_info = {0};
 
 	if (f->index >= ARRAY_SIZE(out_fmts))
 		return -EINVAL;
@@ -9578,7 +10230,7 @@ static int rkcif_enum_fmt_vid_cap_mplane(struct file *file, void *priv,
 	if (dev->terminal_sensor.sd) {
 		cif_fmt_in = rkcif_get_input_fmt(dev,
 					   &input_rect, stream->id,
-					   &dev->channels[stream->id]);
+					   &csi_info);
 		stream->cif_fmt_in = cif_fmt_in;
 	} else {
 		v4l2_err(&stream->cifdev->v4l2_dev,
@@ -10043,12 +10695,17 @@ int rkcif_quick_stream_on(struct rkcif_device *dev, bool is_intr)
 	for (i = 0; i < stream_num; i++)
 		dev->stream[i].cur_skip_frame = dev->stream[i].skip_frame;
 	dev->sditf[0]->mode.rdbk_mode = dev->sditf[0]->mode_src.rdbk_mode;
-	if (dev->switch_info.is_use_switch)
+	if (dev->switch_info.is_use_switch) {
 		atomic_inc(&dev->hw_dev->switch_stream_cnt[dev->switch_info.host_idx]);
+		v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+			 "%s %d, switch inc cnt %d\n", __func__, __LINE__,
+			 atomic_read(&dev->hw_dev->switch_stream_cnt[dev->switch_info.host_idx]));
+	}
 	if (dev->sditf[0]->mode.rdbk_mode < RKISP_VICAP_RDBK_AIQ) {
 		for (i = 0; i < stream_num; i++) {
 			stream = &dev->stream[i];
-			stream->is_pause_stream = false;
+			if (dev->is_in_flip)
+				break;
 			if (stream->cifdev->hdr.hdr_mode == NO_HDR ||
 			    (stream->cifdev->hdr.hdr_mode == HDR_X2 && stream->id == 1) ||
 			    (stream->cifdev->hdr.hdr_mode == HDR_X3 && stream->id == 2)) {
@@ -10078,7 +10735,8 @@ int rkcif_quick_stream_on(struct rkcif_device *dev, bool is_intr)
 						       RKISP_VICAP_CMD_MODE, &dev->sditf[0]->mode);
 		}
 		for (i = 0; i < stream_num; i++) {
-			dev->stream[i].is_pause_stream = false;
+			if (dev->is_in_flip)
+				break;
 			if (dev->sditf[0]->mode.rdbk_mode != RKISP_VICAP_RDBK_AIQ)
 				dev->stream[i].to_en_dma = RKCIF_DMAEN_BY_ISP;
 			else
@@ -10131,7 +10789,14 @@ void rkcif_flip_end_wait_work(struct work_struct *work)
 	if (dev->sditf[0]->mode.rdbk_mode < RKISP_VICAP_RDBK_AIQ) {
 		for (i = 0; i < stream_num; i++) {
 			cur_stream = &dev->stream[i];
-			cur_stream->is_pause_stream = false;
+			cur_stream->is_hold_stream_off = false;
+			if (i == 0) {
+				spin_lock_irqsave(&cur_stream->vbq_lock, flags);
+				dev->is_in_flip = false;
+				spin_unlock_irqrestore(&cur_stream->vbq_lock, flags);
+			}
+			if (cur_stream->state != RKCIF_STATE_STREAMING)
+				continue;
 			if (dev->hdr.hdr_mode == NO_HDR ||
 			    (dev->hdr.hdr_mode == HDR_X2 && cur_stream->id == 1) ||
 			    (dev->hdr.hdr_mode == HDR_X3 && cur_stream->id == 2)) {
@@ -10140,28 +10805,27 @@ void rkcif_flip_end_wait_work(struct work_struct *work)
 				cur_stream->to_en_dma = RKCIF_DMAEN_BY_ISP;
 				rkcif_enable_dma_capture(cur_stream, true);
 			}
+		}
+	} else {
+		for (i = 0; i < stream_num; i++) {
+			cur_stream = &dev->stream[i];
+			cur_stream->is_hold_stream_off = false;
 			if (i == 0) {
 				spin_lock_irqsave(&cur_stream->vbq_lock, flags);
 				dev->is_in_flip = false;
 				spin_unlock_irqrestore(&cur_stream->vbq_lock, flags);
 			}
-		}
-	} else {
-		for (i = 0; i < stream_num; i++) {
-			cur_stream = &dev->stream[i];
-			cur_stream->is_pause_stream = false;
+			if (cur_stream->state != RKCIF_STATE_STREAMING)
+				continue;
 			if (dev->sditf[0]->mode.rdbk_mode != RKISP_VICAP_RDBK_AIQ)
 				cur_stream->to_en_dma = RKCIF_DMAEN_BY_ISP;
 			else
 				cur_stream->to_en_dma = RKCIF_DMAEN_BY_VICAP;
 			rkcif_enable_dma_capture(cur_stream, true);
-			if (i == 0) {
-				spin_lock_irqsave(&cur_stream->vbq_lock, flags);
-				dev->is_in_flip = false;
-				spin_unlock_irqrestore(&cur_stream->vbq_lock, flags);
-			}
 		}
 	}
+	v4l2_dbg(3, rkcif_debug, &dev->v4l2_dev,
+		 "skip frame end, real skip num %d\n", dev->stream[0].real_skip_num);
 	mutex_unlock(&dev->stream_lock);
 }
 
@@ -10245,6 +10909,8 @@ static long rkcif_ioctl_default(struct file *file, void *fh,
 	struct rkisp_vicap_mode vicap_mode;
 	struct v4l2_subdev *sd = NULL;
 	struct rkmodule_error_info *err_info;
+	struct video_device *vdev;
+	struct rkcif_vdev_node *node;
 
 	switch (cmd) {
 	case RKCIF_CMD_GET_CSI_MEMORY_MODE:
@@ -10325,6 +10991,8 @@ static long rkcif_ioctl_default(struct file *file, void *fh,
 				wait_for_completion_timeout(&last_stream->start_complete,
 							    msecs_to_jiffies(RKCIF_STOP_MAX_WAIT_TIME_MS));
 			}
+			stream->is_pause_stream = false;
+			stream->is_hold_stream_off = false;
 		} else {
 			if (dev->sditf[0]->mode.rdbk_mode < RKISP_VICAP_RDBK_AIQ) {
 				stream->cifdev->sensor_state = stream_param->on;
@@ -10333,6 +11001,7 @@ static long rkcif_ioctl_default(struct file *file, void *fh,
 					cur_stream = &dev->stream[i];
 					reinit_completion(&cur_stream->stop_complete);
 					cur_stream->is_wait_stop_complete = true;
+					stream->is_hold_stream_off = true;
 					wait_for_completion_timeout(&cur_stream->stop_complete,
 								    msecs_to_jiffies(RKCIF_STOP_MAX_WAIT_TIME_MS));
 				}
@@ -10340,6 +11009,7 @@ static long rkcif_ioctl_default(struct file *file, void *fh,
 				for (i = 0; i < stream_num; i++) {
 					cur_stream = &dev->stream[i];
 					cur_stream->is_wait_stop_complete = true;
+					stream->is_hold_stream_off = true;
 					reinit_completion(&cur_stream->stop_complete);
 					if (dev->sditf[0]->mode.rdbk_mode == RKISP_VICAP_RDBK_AUTO)
 						cur_stream->to_stop_dma = RKCIF_DMAEN_BY_ISP;
@@ -10406,6 +11076,7 @@ static long rkcif_ioctl_default(struct file *file, void *fh,
 			for (i = 0; i < stream_num; i++) {
 				cur_stream = &dev->stream[i];
 				cur_stream->to_stop_dma = 0;
+				cur_stream->is_hold_stream_off = false;
 				if (dev->hdr.hdr_mode == NO_HDR ||
 				    (dev->hdr.hdr_mode == HDR_X2 && cur_stream->id == 1) ||
 				    (dev->hdr.hdr_mode == HDR_X3 && cur_stream->id == 2)) {
@@ -10424,6 +11095,7 @@ static long rkcif_ioctl_default(struct file *file, void *fh,
 				else
 					cur_stream->to_en_dma = RKCIF_DMAEN_BY_VICAP;
 				rkcif_enable_dma_capture(cur_stream, true);
+				cur_stream->is_hold_stream_off = false;
 			}
 			if (dev->switch_info.is_use_switch) {
 				atomic_inc(&dev->hw_dev->switch_stream_cnt[dev->switch_info.host_idx]);
@@ -10474,14 +11146,34 @@ static long rkcif_ioctl_default(struct file *file, void *fh,
 				    capture_info->one_to_multi.frame_pattern[i] > 32)
 					return -EINVAL;
 			}
+		} else if (capture_info->mode == RKMODULE_QUADBAYER_TO_DUAL_PIPE) {
+			vdev = video_devdata(file);
+			node = vdev_to_node(vdev);
+			node->buf_queue.quirk_poll_must_check_waiting_for_buffers = 0;
 		}
-		dev->channels[0].capture_info = *capture_info;
+		mutex_lock(&dev->stream_lock);
+		stream->channel_info.capture_info = *capture_info;
+		mutex_unlock(&dev->stream_lock);
 		v4l2_info(&dev->v4l2_dev,
-			  "set capture mode %d\n", dev->channels[0].capture_info.mode);
+			  "set capture mode %d\n", stream->channel_info.capture_info.mode);
 		break;
 	case RKCIF_CMD_SET_SENSOR_FLIP_START:
 		mutex_lock(&dev->stream_lock);
+		if (dev->hdr.hdr_mode == HDR_X2)
+			stream_num = 2;
+		else if (dev->hdr.hdr_mode == HDR_X3)
+			stream_num = 3;
+		else
+			stream_num = 1;
 		if (atomic_read(&dev->sensor_off)) {
+			for (i = 0; i < stream_num; i++) {
+				cur_stream = &dev->stream[i];
+				cur_stream->real_skip_num = 0;
+				cur_stream->is_hold_stream_off = true;
+			}
+			spin_lock_irqsave(&cur_stream->vbq_lock, flags);
+			dev->is_in_flip = true;
+			spin_unlock_irqrestore(&cur_stream->vbq_lock, flags);
 			mutex_unlock(&dev->stream_lock);
 			return 0;
 		}
@@ -10490,15 +11182,12 @@ static long rkcif_ioctl_default(struct file *file, void *fh,
 			mutex_unlock(&dev->stream_lock);
 			return -EBUSY;
 		}
-		if (dev->hdr.hdr_mode == HDR_X2)
-			stream_num = 2;
-		else if (dev->hdr.hdr_mode == HDR_X3)
-			stream_num = 3;
-		else
-			stream_num = 1;
 		if (dev->sditf[0]->mode.rdbk_mode < RKISP_VICAP_RDBK_AIQ) {
 			for (i = 0; i < stream_num; i++) {
 				cur_stream = &dev->stream[i];
+				if (cur_stream->state != RKCIF_STATE_STREAMING)
+					continue;
+				cur_stream->is_hold_stream_off = true;
 				reinit_completion(&cur_stream->stop_complete);
 				cur_stream->is_wait_stop_complete = true;
 				wait_for_completion_timeout(&cur_stream->stop_complete,
@@ -10512,7 +11201,10 @@ static long rkcif_ioctl_default(struct file *file, void *fh,
 		} else {
 			for (i = 0; i < stream_num; i++) {
 				cur_stream = &dev->stream[i];
+				if (cur_stream->state != RKCIF_STATE_STREAMING)
+					continue;
 				cur_stream->is_wait_stop_complete = true;
+				cur_stream->is_hold_stream_off = true;
 				reinit_completion(&cur_stream->stop_complete);
 				if (dev->sditf[0]->mode.rdbk_mode != RKISP_VICAP_RDBK_AIQ)
 					cur_stream->to_stop_dma = RKCIF_DMAEN_BY_ISP;
@@ -10531,16 +11223,12 @@ static long rkcif_ioctl_default(struct file *file, void *fh,
 		break;
 	case RKCIF_CMD_SET_SENSOR_FLIP_END:
 		mutex_lock(&dev->stream_lock);
-		if (atomic_read(&dev->sensor_off)) {
-			mutex_unlock(&dev->stream_lock);
-			return 0;
-		}
 		flip_skip = *(int *)arg;
 		if (flip_skip) {
 			tline = rkcif_get_linetime(stream);
 			tline = div_u64(tline, 1000);
 			vblank = rkcif_get_sensor_vblank(dev);
-			delay_ms = tline * ((flip_skip - 1) * (vblank + stream->pixm.height) + vblank);
+			delay_ms = tline * (flip_skip * (vblank + stream->pixm.height));
 			delay_ms = div_u64(delay_ms, 1000);
 		} else {
 			delay_ms = 1;
@@ -10559,6 +11247,12 @@ static long rkcif_ioctl_default(struct file *file, void *fh,
 		err_info = (struct rkmodule_error_info *)arg;
 		ret = rkcif_get_error_info(dev, err_info);
 		break;
+	case RKCIF_CMD_SINGLE_BUF_MODE:
+		if (*(int *)arg)
+			stream->is_single_buf_mode = true;
+		else
+			stream->is_single_buf_mode = false;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -10572,8 +11266,10 @@ static int rkcif_dqbuf(struct file *file, void *priv, struct v4l2_buffer *p)
 	struct rkcif_stream *stream = video_drvdata(file);
 
 	ret = vb2_ioctl_dqbuf(file, priv, p);
-	if (stream->low_latency)
-		rkcif_dqbuf_get_done_fence(stream);
+	if (stream->low_latency && stream->rkcif_fence)
+		v4l2_dbg(2, rkcif_debug, &stream->cifdev->v4l2_dev, "%s: fence:%p, fence fd:%d\n",
+			__func__, stream->rkcif_fence->fence,
+			stream->rkcif_fence->fence_fd);
 
 	return ret;
 }
@@ -10617,6 +11313,7 @@ void rkcif_vb_done_oneframe(struct rkcif_stream *stream,
 	v4l2_dbg(2, rkcif_debug, &stream->cifdev->v4l2_dev,
 		 "stream[%d] vb done, index: %d, sequence %d\n", stream->id,
 		 vb_done->vb2_buf.index, vb_done->sequence);
+	stream->frame_out_cnt++;
 	atomic_dec(&stream->buf_cnt);
 }
 
@@ -11455,6 +12152,9 @@ static bool rkcif_is_triggered_monitoring(struct rkcif_device *dev)
 		ret = timer->is_csi2_err_occurred;
 	}
 
+	if (READ_ONCE(dev->is_toisp_reset))
+		ret = true;
+
 	return ret;
 }
 
@@ -11704,7 +12404,7 @@ static void rkcif_monitor_reset_event(struct rkcif_device *dev)
 	}
 }
 
-static void rkcif_rdbk_frame_end(struct rkcif_stream *stream)
+static bool rkcif_rdbk_frame_end(struct rkcif_stream *stream)
 {
 	struct rkcif_device *dev = stream->cifdev;
 	struct rkcif_sensor_info *sensor = &stream->cifdev->terminal_sensor;
@@ -11718,13 +12418,13 @@ static void rkcif_rdbk_frame_end(struct rkcif_stream *stream)
 		if (stream->id != RKCIF_STREAM_MIPI_ID1 ||
 		    dev->stream[RKCIF_STREAM_MIPI_ID0].state != RKCIF_STATE_STREAMING ||
 		    dev->stream[RKCIF_STREAM_MIPI_ID1].state != RKCIF_STATE_STREAMING)
-			return;
+			return false;
 	} else if (dev->hdr.hdr_mode == HDR_X3) {
 		if (stream->id != RKCIF_STREAM_MIPI_ID2 ||
 		    dev->stream[RKCIF_STREAM_MIPI_ID0].state != RKCIF_STATE_STREAMING ||
 		    dev->stream[RKCIF_STREAM_MIPI_ID1].state != RKCIF_STATE_STREAMING ||
 		    dev->stream[RKCIF_STREAM_MIPI_ID2].state != RKCIF_STATE_STREAMING)
-			return;
+			return false;
 	}
 
 	numerator = sensor->fi.interval.numerator;
@@ -11741,10 +12441,27 @@ static void rkcif_rdbk_frame_end(struct rkcif_stream *stream)
 			s_ts = dev->rdbk_buf[RDBK_S]->fe_timestamp;
 
 			if (m_ts < l_ts || s_ts < m_ts) {
+				/* Drop the oldest stale frame to recover matching window. */
+				if (l_ts <= m_ts && l_ts <= s_ts) {
+					rkcif_count_loss_fe_no_out(&dev->stream[RKCIF_STREAM_MIPI_ID0], 1);
+					dev->rdbk_buf[RDBK_L]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
+					rkcif_buf_queue(&dev->rdbk_buf[RDBK_L]->vb.vb2_buf);
+					dev->rdbk_buf[RDBK_L] = NULL;
+				} else if (m_ts <= l_ts && m_ts <= s_ts) {
+					rkcif_count_loss_fe_no_out(&dev->stream[RKCIF_STREAM_MIPI_ID1], 1);
+					dev->rdbk_buf[RDBK_M]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
+					rkcif_buf_queue(&dev->rdbk_buf[RDBK_M]->vb.vb2_buf);
+					dev->rdbk_buf[RDBK_M] = NULL;
+				} else {
+					rkcif_count_loss_fe_no_out(&dev->stream[RKCIF_STREAM_MIPI_ID2], 1);
+					dev->rdbk_buf[RDBK_S]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
+					rkcif_buf_queue(&dev->rdbk_buf[RDBK_S]->vb.vb2_buf);
+					dev->rdbk_buf[RDBK_S] = NULL;
+				}
 				v4l2_err(&dev->v4l2_dev,
 					 "s/m/l frame err, timestamp s:%lld m:%lld l:%lld\n",
 					 s_ts, m_ts, l_ts);
-				return;
+				return false;
 			}
 
 			if ((m_ts - l_ts) > time || (s_ts - m_ts) > time) {
@@ -11762,10 +12479,27 @@ static void rkcif_rdbk_frame_end(struct rkcif_stream *stream)
 				}
 
 				if ((m_ts - l_ts) > time || (s_ts - m_ts) > time) {
+					/* Timeout-like mismatch: drop the oldest frame and keep newer ones. */
+					if (l_ts <= m_ts && l_ts <= s_ts) {
+						rkcif_count_loss_fe_no_out(&dev->stream[RKCIF_STREAM_MIPI_ID0], 1);
+						dev->rdbk_buf[RDBK_L]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
+						rkcif_buf_queue(&dev->rdbk_buf[RDBK_L]->vb.vb2_buf);
+						dev->rdbk_buf[RDBK_L] = NULL;
+					} else if (m_ts <= l_ts && m_ts <= s_ts) {
+						rkcif_count_loss_fe_no_out(&dev->stream[RKCIF_STREAM_MIPI_ID1], 1);
+						dev->rdbk_buf[RDBK_M]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
+						rkcif_buf_queue(&dev->rdbk_buf[RDBK_M]->vb.vb2_buf);
+						dev->rdbk_buf[RDBK_M] = NULL;
+					} else {
+						rkcif_count_loss_fe_no_out(&dev->stream[RKCIF_STREAM_MIPI_ID2], 1);
+						dev->rdbk_buf[RDBK_S]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
+						rkcif_buf_queue(&dev->rdbk_buf[RDBK_S]->vb.vb2_buf);
+						dev->rdbk_buf[RDBK_S] = NULL;
+					}
 					v4l2_err(&dev->v4l2_dev,
 						 "timestamp no match, s:%lld m:%lld l:%lld, fps:%d\n",
 						 s_ts, m_ts, l_ts, fps);
-					return;
+					return false;
 				}
 			}
 			dev->rdbk_buf[RDBK_M]->vb.sequence = dev->rdbk_buf[RDBK_L]->vb.sequence;
@@ -11787,14 +12521,53 @@ static void rkcif_rdbk_frame_end(struct rkcif_stream *stream)
 				rkcif_vb_done_tasklet(&dev->stream[RKCIF_STREAM_MIPI_ID1], dev->rdbk_buf[RDBK_M]);
 				rkcif_vb_done_tasklet(&dev->stream[RKCIF_STREAM_MIPI_ID2], dev->rdbk_buf[RDBK_S]);
 			}
+			dev->stream[RKCIF_STREAM_MIPI_ID0].fs_cnt_in_single_frame = 0;
+			dev->stream[RKCIF_STREAM_MIPI_ID1].fs_cnt_in_single_frame = 0;
+			dev->stream[RKCIF_STREAM_MIPI_ID2].fs_cnt_in_single_frame = 0;
 		} else {
-			if (!dev->rdbk_buf[RDBK_L])
-				v4l2_err(&dev->v4l2_dev, "lost long frames\n");
-			if (!dev->rdbk_buf[RDBK_M])
-				v4l2_err(&dev->v4l2_dev, "lost medium frames\n");
-			if (!dev->rdbk_buf[RDBK_S])
-				v4l2_err(&dev->v4l2_dev, "lost short frames\n");
-			return;
+			u64 now = rkcif_time_get_ns(dev);
+			int partial_cnt = 0;
+			u64 oldest_ts = 0;
+			u64 stale_age = 0;
+			bool timeout = false;
+
+			for (i = 0; i < RDBK_MAX; i++) {
+				struct rkcif_buffer *b = dev->rdbk_buf[i];
+
+				if (!b)
+					continue;
+				if (!partial_cnt || b->fe_timestamp < oldest_ts)
+					oldest_ts = b->fe_timestamp;
+				partial_cnt++;
+			}
+
+			if (partial_cnt > 0 && partial_cnt < RDBK_MAX)
+				stale_age = now - oldest_ts;
+
+			if (partial_cnt > 0 && partial_cnt < RDBK_MAX && stale_age > time)
+				timeout = true;
+
+			if (timeout) {
+				v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+					 "HDR_X3 pair timeout: L=%d M=%d S=%d age=%llu(ns) frame_idx=%d\n",
+					 !!dev->rdbk_buf[RDBK_L], !!dev->rdbk_buf[RDBK_M],
+					 !!dev->rdbk_buf[RDBK_S],
+					 stale_age, stream->frame_idx);
+				for (i = 0; i < RDBK_MAX; i++) {
+					if (dev->rdbk_buf[i]) {
+						rkcif_count_loss_fe_no_out(&dev->stream[i], 1);
+						dev->rdbk_buf[i]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
+						rkcif_buf_queue(&dev->rdbk_buf[i]->vb.vb2_buf);
+						dev->rdbk_buf[i] = NULL;
+					}
+				}
+			} else {
+				v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+					 "HDR_X3 wait pair: L=%d M=%d S=%d frame_idx=%d\n",
+					 !!dev->rdbk_buf[RDBK_L], !!dev->rdbk_buf[RDBK_M],
+					 !!dev->rdbk_buf[RDBK_S], stream->frame_idx);
+			}
+			return false;
 		}
 	} else if (dev->hdr.hdr_mode == HDR_X2) {
 		if (dev->rdbk_buf[RDBK_L] && dev->rdbk_buf[RDBK_M]) {
@@ -11802,10 +12575,15 @@ static void rkcif_rdbk_frame_end(struct rkcif_stream *stream)
 			s_ts = dev->rdbk_buf[RDBK_M]->fe_timestamp;
 
 			if (s_ts < l_ts) {
+				/* short is stale: drop short and keep long waiting for next match */
+				rkcif_count_loss_fe_no_out(&dev->stream[RKCIF_STREAM_MIPI_ID1], 1);
+				dev->rdbk_buf[RDBK_M]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
+				rkcif_buf_queue(&dev->rdbk_buf[RDBK_M]->vb.vb2_buf);
+				dev->rdbk_buf[RDBK_M] = NULL;
 				v4l2_err(&dev->v4l2_dev,
 					 "s/l frame err, timestamp s:%lld l:%lld\n",
 					 s_ts, l_ts);
-				return;
+				return false;
 			}
 
 			if ((s_ts - l_ts) > time) {
@@ -11822,10 +12600,15 @@ static void rkcif_rdbk_frame_end(struct rkcif_stream *stream)
 					}
 				}
 				if ((s_ts - l_ts) > time) {
+					/* long is stale when short arrives too late */
+					rkcif_count_loss_fe_no_out(&dev->stream[RKCIF_STREAM_MIPI_ID0], 1);
+					dev->rdbk_buf[RDBK_L]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
+					rkcif_buf_queue(&dev->rdbk_buf[RDBK_L]->vb.vb2_buf);
+					dev->rdbk_buf[RDBK_L] = NULL;
 					v4l2_err(&dev->v4l2_dev,
 						 "timestamp no match, s:%lld l:%lld, fps:%d\n",
 						 s_ts, l_ts, fps);
-					return;
+					return false;
 				}
 			}
 			dev->rdbk_buf[RDBK_M]->vb.sequence = dev->rdbk_buf[RDBK_L]->vb.sequence;
@@ -11844,18 +12627,56 @@ static void rkcif_rdbk_frame_end(struct rkcif_stream *stream)
 				rkcif_vb_done_tasklet(&dev->stream[RKCIF_STREAM_MIPI_ID0], dev->rdbk_buf[RDBK_L]);
 				rkcif_vb_done_tasklet(&dev->stream[RKCIF_STREAM_MIPI_ID1], dev->rdbk_buf[RDBK_M]);
 			}
+			dev->stream[RKCIF_STREAM_MIPI_ID0].fs_cnt_in_single_frame = 0;
+			dev->stream[RKCIF_STREAM_MIPI_ID1].fs_cnt_in_single_frame = 0;
 		} else {
-			if (!dev->rdbk_buf[RDBK_L])
-				v4l2_err(&dev->v4l2_dev, "lost long frames\n");
-			if (!dev->rdbk_buf[RDBK_M])
-				v4l2_err(&dev->v4l2_dev, "lost short frames\n");
-			return;
+			u64 now = rkcif_time_get_ns(dev);
+			struct rkcif_buffer *stale_buf = NULL;
+			u64 stale_age = 0;
+			bool timeout = false;
+
+			if (dev->rdbk_buf[RDBK_L] && !dev->rdbk_buf[RDBK_M]) {
+				stale_buf = dev->rdbk_buf[RDBK_L];
+				stale_age = now - stale_buf->fe_timestamp;
+			} else if (!dev->rdbk_buf[RDBK_L] && dev->rdbk_buf[RDBK_M]) {
+				stale_buf = dev->rdbk_buf[RDBK_M];
+				stale_age = now - stale_buf->fe_timestamp;
+			}
+
+			if (stale_buf && stale_age > time)
+				timeout = true;
+
+			if (timeout) {
+				v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+					 "HDR_X2 pair timeout: L=%d M=%d age=%llu(ns) frame_idx=%d\n",
+					 !!dev->rdbk_buf[RDBK_L], !!dev->rdbk_buf[RDBK_M],
+					 stale_age, stream->frame_idx);
+				if (dev->rdbk_buf[RDBK_L]) {
+					rkcif_count_loss_fe_no_out(&dev->stream[RKCIF_STREAM_MIPI_ID0], 1);
+					dev->rdbk_buf[RDBK_L]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
+					rkcif_buf_queue(&dev->rdbk_buf[RDBK_L]->vb.vb2_buf);
+				}
+				if (dev->rdbk_buf[RDBK_M]) {
+					rkcif_count_loss_fe_no_out(&dev->stream[RKCIF_STREAM_MIPI_ID1], 1);
+					dev->rdbk_buf[RDBK_M]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
+					rkcif_buf_queue(&dev->rdbk_buf[RDBK_M]->vb.vb2_buf);
+				}
+				dev->rdbk_buf[RDBK_L] = NULL;
+				dev->rdbk_buf[RDBK_M] = NULL;
+			} else {
+				v4l2_dbg(5, rkcif_debug, &dev->v4l2_dev,
+					 "HDR_X2 wait pair: L=%d M=%d age=%llu(ns) frame_idx=%d\n",
+					 !!dev->rdbk_buf[RDBK_L], !!dev->rdbk_buf[RDBK_M],
+					 stale_age, stream->frame_idx);
+			}
+			return false;
 		}
 	}
 
 	dev->rdbk_buf[RDBK_L] = NULL;
 	dev->rdbk_buf[RDBK_M] = NULL;
 	dev->rdbk_buf[RDBK_S] = NULL;
+	return true;
 }
 
 static void rkcif_buf_done_with_tools(struct rkcif_stream *stream,
@@ -11874,7 +12695,7 @@ static void rkcif_buf_done_with_tools(struct rkcif_stream *stream,
 	spin_unlock_irqrestore(&stream->tools_vdev->vbq_lock, flags);
 }
 
-static void rkcif_buf_done_prepare(struct rkcif_stream *stream,
+static bool rkcif_buf_done_prepare(struct rkcif_stream *stream,
 				   struct rkcif_buffer *active_buf,
 				   int mipi_id,
 				   u32 mode)
@@ -11882,8 +12703,25 @@ static void rkcif_buf_done_prepare(struct rkcif_stream *stream,
 	unsigned long flags;
 	struct vb2_v4l2_buffer *vb_done = NULL;
 	struct rkcif_device *cif_dev = stream->cifdev;
+	bool app_done = false;
+	bool hdr_app_done = false;
 
 	if (active_buf) {
+		/*
+		 * Stats-only fix:
+		 * In HDR readback with very small buffer depth (e.g. buf_cnt=1),
+		 * the same active_buf pointer can be reused while it is still
+		 * pending in rdbk_buf[]. That overwrites one FE record without
+		 * app output, but old code only counted loss when pointer changed.
+		 * Count this overwrite as fe_no_out, without altering buffer flow.
+		 */
+		if (READ_ONCE(cif_dev->is_start_hdr) &&
+		    ((cif_dev->hdr.hdr_mode == HDR_X2 && stream->id < 2) ||
+		     (cif_dev->hdr.hdr_mode == HDR_X3 && stream->id < 3)) &&
+		    cif_dev->rdbk_buf[stream->id] == active_buf) {
+			rkcif_count_loss_fe_no_out(stream, 1);
+		}
+
 		vb_done = &active_buf->vb;
 		if (cif_dev->chip_id < CHIP_RK3588_CIF &&
 		    cif_dev->active_sensor->mbus.type == V4L2_MBUS_BT656)
@@ -11906,7 +12744,7 @@ static void rkcif_buf_done_prepare(struct rkcif_stream *stream,
 			vb_done->sequence /= 2;
 		if (stream->cur_skip_frame) {
 			rkcif_buf_queue(&active_buf->vb.vb2_buf);
-			return;
+			return false;
 		}
 		if (cif_dev->channels[0].capture_info.mode == RKMODULE_ONE_CH_TO_MULTI_ISP)
 			vb_done->sequence /= cif_dev->channels[0].capture_info.one_to_multi.isp_num;
@@ -11923,7 +12761,7 @@ static void rkcif_buf_done_prepare(struct rkcif_stream *stream,
 		cif_dev->rdbk_buf[stream->id]->fe_timestamp = rkcif_time_get_ns(cif_dev);
 	}
 
-	if (cif_dev->hdr.hdr_mode == NO_HDR || cif_dev->hdr.hdr_mode == HDR_COMPR ||
+	if (cif_dev->hdr.hdr_mode == NO_HDR || cif_dev->hdr.hdr_mode == HDR_CIS_MERGE ||
 	    (cif_dev->hdr.hdr_mode == HDR_X2 && stream->id > 1) ||
 	    (cif_dev->hdr.hdr_mode == HDR_X3 && stream->id > 2)) {
 		if (rkcif_get_interlace_mode(stream) == RKCIF_INTERLACE_SOFT ||
@@ -11933,6 +12771,7 @@ static void rkcif_buf_done_prepare(struct rkcif_stream *stream,
 					rkcif_buf_done_with_tools(stream, active_buf);
 				else
 					rkcif_vb_done_tasklet(stream, active_buf);
+				app_done = true;
 			}
 		} else {
 			if (active_buf) {
@@ -11940,18 +12779,21 @@ static void rkcif_buf_done_prepare(struct rkcif_stream *stream,
 					rkcif_buf_done_with_tools(stream, active_buf);
 				else
 					rkcif_vb_done_tasklet(stream, active_buf);
+				app_done = true;
 			}
 		}
 	} else {
-		if (cif_dev->is_start_hdr) {
+		if (READ_ONCE(cif_dev->is_start_hdr)) {
 			spin_lock_irqsave(&cif_dev->hdr_lock, flags);
 			if (mipi_id == RKCIF_STREAM_MIPI_ID0) {
-				if (cif_dev->rdbk_buf[RDBK_L] && active_buf) {
+				if (cif_dev->rdbk_buf[RDBK_L] && active_buf &&
+				    cif_dev->rdbk_buf[RDBK_L] != active_buf) {
 					v4l2_err(&cif_dev->v4l2_dev,
 						 "multiple long data in %s frame,frm_idx:%d,state:0x%x\n",
 						 cif_dev->hdr.hdr_mode == HDR_X2 ? "hdr_x2" : "hdr_x3",
 						 stream->frame_idx,
 						 cif_dev->rdbk_buf[RDBK_L]->vb.vb2_buf.state);
+					rkcif_count_loss_fe_no_out(&cif_dev->stream[RKCIF_STREAM_MIPI_ID0], 1);
 					cif_dev->rdbk_buf[RDBK_L]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
 					rkcif_buf_queue(&cif_dev->rdbk_buf[RDBK_L]->vb.vb2_buf);
 					cif_dev->rdbk_buf[RDBK_L] = NULL;
@@ -11959,12 +12801,14 @@ static void rkcif_buf_done_prepare(struct rkcif_stream *stream,
 				if (active_buf)
 					cif_dev->rdbk_buf[RDBK_L] = active_buf;
 			} else if (mipi_id == RKCIF_STREAM_MIPI_ID1) {
-				if (cif_dev->rdbk_buf[RDBK_M] && active_buf) {
+				if (cif_dev->rdbk_buf[RDBK_M] && active_buf &&
+				    cif_dev->rdbk_buf[RDBK_M] != active_buf) {
 					v4l2_err(&cif_dev->v4l2_dev,
 						 "multiple %s frame,frm_idx:%d,state:0x%x\n",
 						 cif_dev->hdr.hdr_mode == HDR_X2 ? "short data in hdr_x2" : "medium data in hdr_x3",
 						 stream->frame_idx,
 						 cif_dev->rdbk_buf[RDBK_M]->vb.vb2_buf.state);
+					rkcif_count_loss_fe_no_out(&cif_dev->stream[RKCIF_STREAM_MIPI_ID1], 1);
 					cif_dev->rdbk_buf[RDBK_M]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
 					rkcif_buf_queue(&cif_dev->rdbk_buf[RDBK_M]->vb.vb2_buf);
 					cif_dev->rdbk_buf[RDBK_M] = NULL;
@@ -11972,14 +12816,16 @@ static void rkcif_buf_done_prepare(struct rkcif_stream *stream,
 				if (active_buf)
 					cif_dev->rdbk_buf[RDBK_M] = active_buf;
 				if (cif_dev->hdr.hdr_mode == HDR_X2)
-					rkcif_rdbk_frame_end(stream);
+					hdr_app_done = rkcif_rdbk_frame_end(stream);
 			} else if (mipi_id == RKCIF_STREAM_MIPI_ID2) {
-				if (cif_dev->rdbk_buf[RDBK_S] && active_buf) {
+				if (cif_dev->rdbk_buf[RDBK_S] && active_buf &&
+				    cif_dev->rdbk_buf[RDBK_S] != active_buf) {
 					v4l2_err(&cif_dev->v4l2_dev,
 						 "multiple %s frame, frm_idx:%d,state:0x%x\n",
 						 cif_dev->hdr.hdr_mode == HDR_X2 ? "err short data in hdr_x3" : "short data in hdr_x3",
 						 stream->frame_idx,
 						 cif_dev->rdbk_buf[RDBK_S]->vb.vb2_buf.state);
+					rkcif_count_loss_fe_no_out(&cif_dev->stream[RKCIF_STREAM_MIPI_ID2], 1);
 					cif_dev->rdbk_buf[RDBK_S]->vb.vb2_buf.state = VB2_BUF_STATE_ACTIVE;
 					rkcif_buf_queue(&cif_dev->rdbk_buf[RDBK_S]->vb.vb2_buf);
 					cif_dev->rdbk_buf[RDBK_S] = NULL;
@@ -11987,25 +12833,28 @@ static void rkcif_buf_done_prepare(struct rkcif_stream *stream,
 				if (active_buf)
 					cif_dev->rdbk_buf[RDBK_S] = active_buf;
 				if (cif_dev->hdr.hdr_mode == HDR_X3)
-					rkcif_rdbk_frame_end(stream);
+					hdr_app_done = rkcif_rdbk_frame_end(stream);
 			}
 			spin_unlock_irqrestore(&cif_dev->hdr_lock, flags);
+			if (hdr_app_done)
+				app_done = true;
 		} else {
 			if (active_buf) {
 				vb_done->vb2_buf.state = VB2_BUF_STATE_ACTIVE;
 				rkcif_buf_queue(&vb_done->vb2_buf);
 			}
 
-			v4l2_info(&cif_dev->v4l2_dev,
-				  "warning:hdr runs stream[%d], stream[0]:%s stream[1]:%s stream[2]:%s stream[3]:%s\n",
-				  stream->id,
-				  cif_dev->stream[0].state != RKCIF_STATE_STREAMING ? "stopped" : "running",
-				  cif_dev->stream[1].state != RKCIF_STATE_STREAMING ? "stopped" : "running",
-				  cif_dev->stream[2].state != RKCIF_STATE_STREAMING ? "stopped" : "running",
-				  cif_dev->stream[3].state != RKCIF_STATE_STREAMING ? "stopped" : "running");
+			v4l2_dbg(5, rkcif_debug, &cif_dev->v4l2_dev,
+				 "warning:hdr runs stream[%d], stream[0]:%s stream[1]:%s stream[2]:%s stream[3]:%s\n",
+				 stream->id,
+				 cif_dev->stream[0].state != RKCIF_STATE_STREAMING ? "stopped" : "running",
+				 cif_dev->stream[1].state != RKCIF_STATE_STREAMING ? "stopped" : "running",
+				 cif_dev->stream[2].state != RKCIF_STATE_STREAMING ? "stopped" : "running",
+				 cif_dev->stream[3].state != RKCIF_STATE_STREAMING ? "stopped" : "running");
 		}
 	}
 
+	return app_done;
 }
 
 static void rkcif_line_wake_up_interlace(struct rkcif_stream *stream,
@@ -12046,7 +12895,7 @@ static void rkcif_line_wake_up_interlace(struct rkcif_stream *stream,
 
 	if (fe_interlaced_phase == CIF_CSI_FRAME1_READY &&
 	    stream->last_fe_interlaced_phase == CIF_CSI_FRAME0_READY) {
-		if (dummy_buf->vaddr ||  stream->next_buf) {
+		if (dummy_buf->is_allocated ||  stream->next_buf) {
 			active_buf = stream->curr_buf;
 			if (active_buf) {
 				active_buf->vb.vb2_buf.timestamp = stream->readout.fs_timestamp;
@@ -12075,6 +12924,7 @@ static void rkcif_line_wake_up(struct rkcif_stream *stream, int mipi_id)
 {
 	u32 mode;
 	struct rkcif_buffer *active_buf = NULL;
+	struct rkcif_device *cif_dev = stream->cifdev;
 	int ret = 0;
 
 	mode = stream->line_int_cnt % 2;
@@ -12097,7 +12947,15 @@ static void rkcif_line_wake_up(struct rkcif_stream *stream, int mipi_id)
 	if (active_buf && stream->low_latency)
 		rkcif_add_fence_to_vb_done(stream, &active_buf->vb);
 
-	rkcif_buf_done_prepare(stream, active_buf, mipi_id, mode);
+	if (!rkcif_buf_done_prepare(stream, active_buf, mipi_id, mode)) {
+		if (rkcif_should_count_no_app_loss(stream))
+			rkcif_count_loss_fe_no_out(stream, 1);
+		else {
+			v4l2_dbg(5, rkcif_debug, &cif_dev->v4l2_dev,
+				 "stream[%d] skip no_app loss in HDR matching window, frame_idx=%d\n",
+				 stream->id, stream->frame_idx);
+		}
+	}
 }
 
 static void rkcif_store_last_buf_for_online(struct rkcif_stream *stream,
@@ -12107,7 +12965,21 @@ static void rkcif_store_last_buf_for_online(struct rkcif_stream *stream,
 	struct v4l2_mbus_config *mbus_cfg = &dev->active_sensor->mbus;
 	u32 frm0_addr_y, frm1_addr_y;
 
-	INIT_LIST_HEAD(&stream->rx_buf_head);
+	if (!buf)
+		return;
+
+	/*
+	 * Do not INIT_LIST_HEAD(rx_buf_head) here: it detaches queued buffers
+	 * without clearing rx_buf->in_rx_list, so later list_del/list_add
+	 * breaks and ISP paths see impossible ownership. If this buffer was
+	 * still on the free-queue, unlink it explicitly.
+	 */
+	if (buf->in_rx_list) {
+		list_del(&buf->list);
+		buf->in_rx_list = false;
+	}
+	buf->in_isp = false;
+
 	stream->curr_buf_toisp = buf;
 	stream->next_buf_toisp = buf;
 	if (mbus_cfg->type == V4L2_MBUS_CSI2_DPHY ||
@@ -12161,31 +13033,22 @@ static void rkcif_line_wake_up_rdbk(struct rkcif_stream *stream, int mipi_id)
 		stream->frame_phase = CIF_CSI_FRAME1_READY;
 	}
 
-	if (!active_buf) {
-		v4l2_err(&stream->cifdev->v4l2_dev,
-			 "err buffer state in %s\n",
-			 __func__);
-		return;
-	}
-
 	if (stream->stopping) {
 		stream->is_can_stop = true;
 		return;
 	}
 	ret = rkcif_get_new_buffer_wake_up_mode_rdbk(stream);
-	v4l2_dbg(3, rkcif_debug, &stream->cifdev->v4l2_dev,
-		 "%d frame_idx %d, last_rx_buf_idx %d cur dma buf %x, ret %d\n",
-		 __LINE__, stream->frame_idx, stream->last_rx_buf_idx,
-		 (u32)active_buf->dummy.dma_addr, ret);
 
 	priv = stream->cifdev->sditf[0];
-	if (stream->cur_stream_mode & RKCIF_STREAM_MODE_TOISP_RDBK) {
+	if (active_buf && stream->cur_stream_mode & RKCIF_STREAM_MODE_TOISP_RDBK) {
+		v4l2_dbg(3, rkcif_debug, &stream->cifdev->v4l2_dev,
+			 "%d frame_idx %d, last_rx_buf_idx %d cur dma buf %x, ret %d, buf %p\n",
+			 __LINE__, stream->frame_idx, stream->last_rx_buf_idx,
+			 (u32)active_buf->dummy.dma_addr, ret, active_buf);
 		spin_lock_irqsave(&stream->vbq_lock, flags);
 		if (stream->cifdev->is_thunderboot &&
 		    (stream->frame_idx - 1) == stream->last_rx_buf_idx &&
 		     stream->cifdev->is_rdbk_to_online) {
-			stream->cur_stream_mode &= ~RKCIF_STREAM_MODE_TOISP_RDBK;
-			stream->cur_stream_mode |= RKCIF_STREAM_MODE_TOISP;
 			stream->cifdev->wait_line = 0;
 			v4l2_dbg(3, rkcif_debug, &stream->cifdev->v4l2_dev,
 				 "stream[%d] frame_idx %d, last_rx_buf_idx %d cur dma buf %x,  change to online\n",
@@ -12196,25 +13059,37 @@ static void rkcif_line_wake_up_rdbk(struct rkcif_stream *stream, int mipi_id)
 			    (priv->hdr_cfg.hdr_mode == HDR_X3 && stream->id == 2)) {
 				stream->to_stop_dma = RKCIF_DMAEN_BY_ISP;
 				rkcif_stop_dma_capture(stream);
+			} else {
+				stream->is_detect_lack_buf = false;
 			}
 			active_buf->dbufs.is_switch = true;
 			if ((priv->hdr_cfg.hdr_mode == HDR_X2 && stream->id != 1) ||
-			    (priv->hdr_cfg.hdr_mode == HDR_X3 && stream->id != 2)) {
+			    (priv->hdr_cfg.hdr_mode == HDR_X3 && stream->id != 2))
 				rkcif_store_last_buf_for_online(stream, active_buf);
-				stream->is_change_toisp = true;
-			}
+			stream->is_change_toisp = true;
 		}
-		spin_unlock_irqrestore(&stream->vbq_lock, flags);
 		active_buf->dbufs.sequence = stream->sequence;
 		active_buf->dbufs.timestamp = stream->readout.fs_timestamp;
 		active_buf->fe_timestamp = rkcif_time_get_ns(stream->cifdev);
+		stream->last_frame_idx = stream->frame_idx;
 		if (stream->cifdev->hdr.hdr_mode == NO_HDR) {
-			rkcif_s_rx_buffer(stream, &active_buf->dbufs);
 			if (stream->cifdev->is_support_tools && stream->tools_vdev)
 				rkcif_rdbk_with_tools(stream, active_buf);
+			rkcif_s_rx_buffer(stream, &active_buf->dbufs);
+			stream->frame_out_cnt++;
 		} else {
 			rkcif_rdbk_frame_end_toisp(stream, active_buf);
 		}
+		spin_unlock_irqrestore(&stream->vbq_lock, flags);
+	}
+	if (stream->lack_buf_cnt == 2 && stream->is_detect_lack_buf) {
+		if (stream->dma_en & RKCIF_DMAEN_BY_ISP)
+			stream->to_stop_dma = RKCIF_DMAEN_BY_ISP;
+		else if (stream->dma_en & RKCIF_DMAEN_BY_VICAP)
+			stream->to_stop_dma = RKCIF_DMAEN_BY_VICAP;
+		else if (stream->dma_en & RKCIF_DMAEN_BY_ROCKIT)
+			stream->to_stop_dma = RKCIF_DMAEN_BY_ROCKIT;
+		rkcif_stop_dma_capture(stream);
 	}
 
 }
@@ -12239,7 +13114,7 @@ static void rkcif_deal_readout_time(struct rkcif_stream *stream)
 	if (stream->id == RKCIF_STREAM_MIPI_ID0)
 		detect_stream->readout.readout_time = stream->readout.fe_timestamp - stream->readout.fs_timestamp;
 
-	if ((cif_dev->hdr.hdr_mode == NO_HDR || cif_dev->hdr.hdr_mode == HDR_COMPR) &&
+	if ((cif_dev->hdr.hdr_mode == NO_HDR || cif_dev->hdr.hdr_mode == HDR_CIS_MERGE) &&
 	    (stream->id == RKCIF_STREAM_MIPI_ID0)) {
 		detect_stream->readout.early_time = stream->readout.fe_timestamp - stream->readout.wk_timestamp;
 
@@ -12306,7 +13181,7 @@ static void rkcif_update_stream_interlace(struct rkcif_device *cif_dev,
 	if (!stream->is_line_wake_up) {
 		if (fe_interlaced_phase == CIF_CSI_FRAME1_READY &&
 		    stream->last_fe_interlaced_phase == CIF_CSI_FRAME0_READY) {
-			if (dummy_buf->vaddr ||  stream->next_buf) {
+			if (dummy_buf->is_allocated ||  stream->next_buf) {
 				active_buf = stream->curr_buf;
 				if (active_buf) {
 					active_buf->vb.vb2_buf.timestamp = stream->readout.fs_timestamp;
@@ -12314,6 +13189,7 @@ static void rkcif_update_stream_interlace(struct rkcif_device *cif_dev,
 					if (stream->interlaced_bad_frame) {
 						stream->interlaced_bad_frame = false;
 						rkcif_buf_queue(&active_buf->vb.vb2_buf);
+						rkcif_count_loss_fe_no_out(stream, 1);
 						v4l2_dbg(rkcif_debug, 3, &cif_dev->v4l2_dev,
 							 "stream[%d] mipi fe interlace bad frame queue, phase %d, line %d\n",
 							 stream->id, fe_interlaced_phase, __LINE__);
@@ -12323,6 +13199,7 @@ static void rkcif_update_stream_interlace(struct rkcif_device *cif_dev,
 					stream->curr_buf = stream->next_buf;
 					stream->next_buf = NULL;
 				} else {
+					rkcif_count_loss_fe_no_out(stream, 1);
 					stream->curr_buf = stream->next_buf;
 					stream->next_buf = NULL;
 				}
@@ -12341,10 +13218,16 @@ static void rkcif_update_stream(struct rkcif_device *cif_dev,
 	struct rkcif_buffer *active_buf = NULL;
 	unsigned long flags;
 	int ret = 0;
+	bool fe_loss_counted = false;
 
 	if (stream->frame_phase == (CIF_CSI_FRAME0_READY | CIF_CSI_FRAME1_READY)) {
 		cif_dev->err_state |= (RKCIF_ERR_ID0_TRIG_SIMULT << stream->id);
 		cif_dev->irq_stats.trig_simult_cnt[stream->id]++;
+		/*
+		 * Stats-only: this FE interrupt does not produce a valid output
+		 * in current flow, so it must be accounted as no-output loss.
+		 */
+		rkcif_count_loss_fe_no_out(stream, 1);
 		return;
 	}
 	if (!stream->is_line_wake_up) {
@@ -12369,19 +13252,66 @@ static void rkcif_update_stream(struct rkcif_device *cif_dev,
 		ret = rkcif_assign_new_buffer_pingpong(stream,
 						       RKCIF_YUV_ADDR_STATE_UPDATE,
 						       mipi_id);
-		if (ret && cif_dev->chip_id < CHIP_RK3588_CIF)
-			return;
+		if (ret) {
+			rkcif_count_loss_fe_no_out(stream, 1);
+			fe_loss_counted = true;
+			if (cif_dev->chip_id < CHIP_RK3588_CIF)
+				return;
+		}
 	} else {
 		ret = rkcif_update_new_buffer_wake_up_mode(stream);
-		if (ret && cif_dev->chip_id < CHIP_RK3588_CIF)
-			return;
+		if (ret) {
+			rkcif_count_loss_fe_no_out(stream, 1);
+			fe_loss_counted = true;
+			if (cif_dev->chip_id < CHIP_RK3588_CIF)
+				return;
+		}
 	}
 	if (cif_dev->chip_id < CHIP_RK3588_CIF &&
 	    cif_dev->active_sensor->mbus.type == V4L2_MBUS_BT656 &&
 	    stream->id != 0)
 		stream->frame_idx++;
-	if (!stream->is_line_wake_up)
-		rkcif_buf_done_prepare(stream, active_buf, mipi_id, 0);
+	if (!stream->is_line_wake_up) {
+		if (!rkcif_buf_done_prepare(stream, active_buf, mipi_id, 0)) {
+			if (!fe_loss_counted && stream->cur_skip_frame) {
+				/*
+				 * Skipped FE still consumes one frame_amount slot.
+				 * Account it as no-output loss to keep stats auditable.
+				 */
+				rkcif_count_loss_fe_no_out(stream, 1);
+				fe_loss_counted = true;
+			} else if (!fe_loss_counted &&
+				   rkcif_should_count_no_app_loss(stream))
+				rkcif_count_loss_fe_no_out(stream, 1);
+			else if (!fe_loss_counted) {
+				/*
+				 * Stats-only fix:
+				 * HDR_X2 commit FE (stream1) can hit suppress path even when
+				 * both pending slots are empty. That means this FE cycle has
+				 * no chance to output and must be treated as no-output loss.
+				 * Keep buffer flow untouched, only fix loss accounting.
+				 */
+				if (READ_ONCE(cif_dev->is_start_hdr) &&
+				    cif_dev->hdr.hdr_mode == HDR_X2 &&
+				    stream->id == RKCIF_STREAM_MIPI_ID1) {
+					/*
+					 * Dynamic stream0-DMA off case:
+					 * only short-path FE exists (M pending, L missing).
+					 * This FE cannot ever form a pair and should count
+					 * as stream1 no-output loss.
+					 */
+					if (!cif_dev->rdbk_buf[RDBK_L] &&
+					    cif_dev->rdbk_buf[RDBK_M]) {
+						rkcif_count_loss_fe_no_out(&cif_dev->stream[RKCIF_STREAM_MIPI_ID1], 1);
+					} else if (!cif_dev->rdbk_buf[RDBK_L] &&
+						   !cif_dev->rdbk_buf[RDBK_M]) {
+						rkcif_count_loss_fe_no_out(&cif_dev->stream[RKCIF_STREAM_MIPI_ID0], 1);
+						rkcif_count_loss_fe_no_out(&cif_dev->stream[RKCIF_STREAM_MIPI_ID1], 1);
+					}
+				}
+			}
+		}
+	}
 
 	if (cif_dev->chip_id == CHIP_RV1126_CIF ||
 	    cif_dev->chip_id == CHIP_RV1126_CIF_LITE ||
@@ -12422,6 +13352,7 @@ static void rkcif_update_stream_rockit(struct rkcif_device *cif_dev,
 {
 	struct rkcif_buffer *active_buf = NULL;
 	unsigned long flags;
+	int ret;
 
 	if (stream->frame_phase == (CIF_CSI_FRAME0_READY | CIF_CSI_FRAME1_READY)) {
 
@@ -12447,14 +13378,21 @@ static void rkcif_update_stream_rockit(struct rkcif_device *cif_dev,
 	if (!cif_dev->sditf[0] || cif_dev->sditf[0]->mode.rdbk_mode >= RKISP_VICAP_RDBK_AIQ)
 		rkcif_deal_readout_time(stream);
 
-	rkcif_assign_new_buffer_pingpong_rockit(stream,
-						RKCIF_YUV_ADDR_STATE_UPDATE,
-						mipi_id);
+	ret = rkcif_assign_new_buffer_pingpong_rockit(stream,
+						      RKCIF_YUV_ADDR_STATE_UPDATE,
+						      mipi_id);
+
+	if (ret < 0) {
+		rkcif_count_loss_fe_no_out(stream, 1);
+		return;
+	}
 
 	if (active_buf) {
 		active_buf->vb.vb2_buf.timestamp = stream->readout.fs_timestamp;
 		active_buf->vb.sequence = stream->frame_idx - 1;
 		rkcif_rockit_buf_done(stream, active_buf);
+	} else if (!stream->is_line_wake_up) {
+		rkcif_count_loss_fe_no_out(stream, 1);
 	}
 }
 
@@ -12784,7 +13722,7 @@ static int rkcif_do_reset_work(struct rkcif_device *cif_dev,
 
 	rkcif_do_soft_reset(cif_dev);
 
-	if (priv && priv->mode.rdbk_mode == RKISP_VICAP_ONLINE)
+	if (priv && priv->mode.rdbk_mode < RKISP_VICAP_RDBK_AIQ)
 		rkcif_toisp_set_stream(cif_dev, 1);
 
 	rkcif_streamon_in_reset(cif_dev,
@@ -13082,8 +14020,8 @@ static int rkcif_detect_reset_event(struct rkcif_stream *stream,
 		} else {
 
 			v4l2_info(&dev->v4l2_dev,
-				  "do reset work due to frame end is stopped, run_cnt:%d\n",
-				  timer->run_cnt);
+				  "do reset work due to frame end is stopped, run_cnt:%d, stream[%d]\n",
+				  timer->run_cnt, stream->id);
 
 			timer->reset_src = RKICF_RESET_SRC_ERR_CUTOFF;
 			rkcif_init_reset_work(timer);
@@ -13212,7 +14150,7 @@ static void rkcif_detect_wake_up_mode_change(struct rkcif_stream *stream)
 	if (!priv || priv->mode.rdbk_mode < RKISP_VICAP_RDBK_AIQ)
 		return;
 
-	if ((cif_dev->hdr.hdr_mode == NO_HDR || cif_dev->hdr.hdr_mode == HDR_COMPR) &&
+	if ((cif_dev->hdr.hdr_mode == NO_HDR || cif_dev->hdr.hdr_mode == HDR_CIS_MERGE) &&
 	    stream->id == RKCIF_STREAM_MIPI_ID0) {
 		if (cif_dev->wait_line != cif_dev->wait_line_cache)
 			cif_dev->wait_line = cif_dev->wait_line_cache;
@@ -13461,6 +14399,7 @@ void rkcif_enable_dma_capture(struct rkcif_stream *stream, bool is_only_enable)
 			else
 				val &= ~uncompact;
 		}
+		val |= ENABLE_CAPTURE;
 		rkcif_write_register(cif_dev, get_reg_index_of_id_ctrl0(stream->id), val);
 	} else if (mbus_cfg->type == V4L2_MBUS_CCP2) {
 		val = rkcif_read_register(cif_dev, get_reg_index_of_lvds_id_ctrl0(stream->id));
@@ -13471,6 +14410,7 @@ void rkcif_enable_dma_capture(struct rkcif_stream *stream, bool is_only_enable)
 				val &= ~(CSI_WRDDR_TYPE_RAW_UNCOMPACT << 17);
 		}
 		val |= LVDS_DMAEN_RV1106;
+		val |= ENABLE_CAPTURE;
 		rkcif_write_register(cif_dev, get_reg_index_of_lvds_id_ctrl0(stream->id), val);
 	} else {
 		val = rkcif_read_register(cif_dev, CIF_REG_DVP_FOR);
@@ -13490,6 +14430,7 @@ void rkcif_enable_dma_capture(struct rkcif_stream *stream, bool is_only_enable)
 	}
 
 	stream->to_en_dma = 0;
+	stream->is_pause_stream = false;
 }
 
 static int rkcif_stop_dma_capture(struct rkcif_stream *stream)
@@ -13549,6 +14490,7 @@ static int rkcif_stop_dma_capture(struct rkcif_stream *stream)
 		}
 	}
 	stream->to_stop_dma = 0;
+	stream->is_pause_stream = true;
 	v4l2_dbg(4, rkcif_debug, &cif_dev->v4l2_dev,
 		 "stream[%d] replace_cnt %d, y_addr 0x%x, 0x%x\n",
 		 stream->id, stream->buf_replace_cnt,
@@ -13821,7 +14763,7 @@ static int rkcif_get_sof_and_exp_info(struct rkcif_device *cif_dev,
 	int idx_max = 0;
 
 	sof_info->timestamp = stream->readout.fs_timestamp;
-	sof_info->sequence = stream->frame_idx;
+	sof_info->sequence = rkcif_get_sof(cif_dev);
 
 	if (!cif_dev->is_support_get_exp)
 		return 0;
@@ -13999,6 +14941,65 @@ static int rkcif_get_sof_and_exp_info(struct rkcif_device *cif_dev,
 	return 0;
 }
 
+static void rkcif_release_unnecessary_buf_for_online(struct rkcif_stream *stream,
+						     struct rkcif_rx_buffer *buf)
+{
+	struct rkcif_device *dev = stream->cifdev;
+	struct sditf_priv *priv = dev->sditf[0];
+	struct rkcif_rx_buffer *rx_buf = NULL;
+	unsigned long flags;
+	int i = 0;
+
+	spin_lock_irqsave(&stream->vbq_lock, flags);
+	if (!buf)
+		buf = stream->last_buf_toisp;
+	stream->curr_buf_toisp = NULL;
+	stream->next_buf_toisp = NULL;
+	INIT_LIST_HEAD(&stream->rx_buf_head);
+	spin_unlock_irqrestore(&stream->vbq_lock, flags);
+	spin_lock_irqsave(&priv->cif_dev->buffree_lock, flags);
+	for (i = 0; i < stream->rx_buf_num; i++) {
+		rx_buf = &stream->rx_buf[i];
+		if (rx_buf && rx_buf->dummy.is_allocated && rx_buf != buf) {
+			list_add_tail(&rx_buf->list_free, &priv->buf_free_list);
+			stream->total_buf_num--;
+			atomic_dec(&stream->buf_cnt);
+		}
+	}
+	spin_unlock_irqrestore(&priv->cif_dev->buffree_lock, flags);
+	schedule_work(&priv->buffree_work.work);
+	v4l2_dbg(1, rkcif_debug, &stream->cifdev->v4l2_dev,
+		 "stream[%d] free rx_buf\n", stream->id);
+	if (buf)
+		v4l2_dbg(1, rkcif_debug, &stream->cifdev->v4l2_dev,
+			"stream[%d] reserved buf 0x%x\n", stream->id, (u32)buf->dummy.dma_addr);
+}
+
+static void rkcif_thunderboot_free_rx_buffer(struct rkcif_device *cif_dev)
+{
+	struct rkcif_stream *stream;
+	int i, stream_cnt;
+
+	if (cif_dev->hdr.hdr_mode == HDR_X2)
+		stream_cnt = 2;
+	else if (cif_dev->hdr.hdr_mode == HDR_X3)
+		stream_cnt = 3;
+	else
+		stream_cnt = 1;
+	for (i = 0; i < stream_cnt; i++) {
+		stream = &cif_dev->stream[i];
+		if (cif_dev->hdr.hdr_mode == NO_HDR ||
+		    (cif_dev->hdr.hdr_mode == HDR_X2 && stream->id == 1) ||
+		    (cif_dev->hdr.hdr_mode == HDR_X3 && stream->id == 2))
+			rkcif_free_rx_buf(stream, stream->rx_buf_num);
+		else
+			rkcif_release_unnecessary_buf_for_online(stream,
+								 stream->curr_buf_toisp);
+		rkcif_modify_line_int(stream, false);
+		stream->is_line_wake_up = false;
+	}
+}
+
 static void rkcif_toisp_check_stop_status(struct sditf_priv *priv,
 					  unsigned int intstat_glb,
 					  int index)
@@ -14032,6 +15033,19 @@ static void rkcif_toisp_check_stop_status(struct sditf_priv *priv,
 				stream = &priv->cif_dev->stream[0];
 			else
 				stream = &priv->cif_dev->stream[src_id % 4];
+
+			if (priv->is_free_thunderboot_buf &&
+			    (stream->cifdev->hdr.hdr_mode == NO_HDR ||
+			     (stream->cifdev->hdr.hdr_mode == HDR_X2 && stream->id == 1) ||
+			     (stream->cifdev->hdr.hdr_mode == HDR_X3 && stream->id == 2))) {
+				if (priv->free_buf_delay_cnt) {
+					priv->free_buf_delay_cnt--;
+				} else {
+					rkcif_thunderboot_free_rx_buffer(stream->cifdev);
+					priv->is_free_thunderboot_buf = false;
+				}
+			}
+
 			if (stream->stopping) {
 				v4l2_dbg(3, rkcif_debug, &priv->cif_dev->v4l2_dev,
 					 "stream[%d] stop\n",
@@ -14042,22 +15056,6 @@ static void rkcif_toisp_check_stop_status(struct sditf_priv *priv,
 			}
 
 			spin_lock_irqsave(&stream->cifdev->stream_spinlock, flags);
-			if (stream->is_wait_stop_complete) {
-				if (!stream->cifdev->switch_info.is_use_switch ||
-				    atomic_dec_if_positive(&stream->cifdev->hw_dev->switch_stream_cnt[stream->cifdev->switch_info.host_idx]) == 0) {
-					if (stream->cifdev->hdr.hdr_mode == NO_HDR ||
-					    (stream->cifdev->hdr.hdr_mode == HDR_X2 && stream->id == 1) ||
-					    (stream->cifdev->hdr.hdr_mode == HDR_X3 && stream->id == 2)) {
-						rkcif_disable_capture(stream);
-					} else {
-						stream->to_stop_dma = RKCIF_DMAEN_BY_ISP;
-						rkcif_stop_dma_capture(stream);
-					}
-				}
-				stream->is_wait_stop_complete = false;
-				stream->is_pause_stream = true;
-				complete(&stream->stop_complete);
-			}
 			if (stream->cifdev->sensor_state_change &&
 			    (stream->cifdev->hdr.hdr_mode == NO_HDR ||
 			    (stream->cifdev->hdr.hdr_mode == HDR_X2 && stream->id == 1) ||
@@ -14083,11 +15081,17 @@ static void rkcif_toisp_check_stop_status(struct sditf_priv *priv,
 					stream->is_single_cap = false;
 					spin_unlock_irqrestore(&stream->cifdev->stream_spinlock, flags);
 					if (!stream->cifdev->switch_info.is_use_switch ||
-					    atomic_read(&stream->cifdev->hw_dev->switch_stream_cnt[stream->cifdev->switch_info.host_idx]) == 0)
+					    atomic_dec_if_positive(&stream->cifdev->hw_dev->switch_stream_cnt[stream->cifdev->switch_info.host_idx]) == 0)
 						rkcif_dphy_quick_stream(stream->cifdev, on);
 					stream->cifdev->sensor_work.on = 0;
 					atomic_inc(&stream->cifdev->sensor_off);
 					schedule_work(&stream->cifdev->sensor_work.work);
+					stream->is_pause_stream = true;
+					stream->is_hold_stream_off = true;
+					if (stream->cifdev->switch_info.is_use_switch)
+						v4l2_dbg(5, rkcif_debug, &stream->cifdev->v4l2_dev,
+							 "%s %d, switch dec cnt %d\n", __func__, __LINE__,
+							 atomic_read(&stream->cifdev->hw_dev->switch_stream_cnt[stream->cifdev->switch_info.host_idx]));
 				} else {
 					stream->is_single_cap = false;
 					stream->is_wait_single_cap = false;
@@ -14097,6 +15101,25 @@ static void rkcif_toisp_check_stop_status(struct sditf_priv *priv,
 				}
 			} else {
 				spin_unlock_irqrestore(&stream->cifdev->stream_spinlock, flags);
+			}
+			if (stream->is_wait_stop_complete) {
+				if (!stream->cifdev->switch_info.is_use_switch ||
+				    atomic_read(&stream->cifdev->hw_dev->switch_stream_cnt[stream->cifdev->switch_info.host_idx]) == 0) {
+					if (stream->cifdev->hdr.hdr_mode == NO_HDR ||
+					    (stream->cifdev->hdr.hdr_mode == HDR_X2 && stream->id == 1) ||
+					    (stream->cifdev->hdr.hdr_mode == HDR_X3 && stream->id == 2)) {
+						rkcif_disable_capture(stream);
+					} else {
+						stream->to_stop_dma = RKCIF_DMAEN_BY_ISP;
+						rkcif_stop_dma_capture(stream);
+					}
+				}
+				if (stream->cifdev->switch_info.is_use_switch)
+					v4l2_dbg(5, rkcif_debug, &stream->cifdev->v4l2_dev,
+						 "%s %d, switch dec cnt %d\n", __func__, __LINE__,
+						 atomic_read(&stream->cifdev->hw_dev->switch_stream_cnt[stream->cifdev->switch_info.host_idx]));
+				stream->is_wait_stop_complete = false;
+				complete(&stream->stop_complete);
 			}
 			if (stream->cur_skip_frame &&
 			    (stream->cifdev->hdr.hdr_mode == NO_HDR ||
@@ -14192,12 +15215,13 @@ static void rkcif_toisp_check_stop_status(struct sditf_priv *priv,
 					rkcif_scale_start(stream->scale_vdev);
 				}
 			}
-			if ((priv->mode_src.rdbk_mode == RKISP_VICAP_ONLINE_MULTI ||
-			     priv->mode_src.rdbk_mode == RKISP_VICAP_ONLINE_UNITE) &&
-			    ((priv->hdr_cfg.hdr_mode == NO_HDR && stream->id == 0) ||
-			      (priv->hdr_cfg.hdr_mode == HDR_X2 && stream->id == 1) ||
-			      (priv->hdr_cfg.hdr_mode == HDR_X3 && stream->id == 2)))
-				sditf_disable_immediately(priv);
+			if ((priv->hdr_cfg.hdr_mode == NO_HDR && stream->id == 0) ||
+			    (priv->hdr_cfg.hdr_mode == HDR_X2 && stream->id == 1) ||
+			    (priv->hdr_cfg.hdr_mode == HDR_X3 && stream->id == 2)) {
+				if (priv->mode_src.rdbk_mode == RKISP_VICAP_ONLINE_MULTI ||
+				    priv->mode_src.rdbk_mode == RKISP_VICAP_ONLINE_UNITE)
+					sditf_disable_immediately(priv);
+			}
 			stream->buf_wake_up_cnt++;
 			if (stream->frame_idx % 2)
 				stream->fps_stats.frm0_timestamp = rkcif_time_get_ns(stream->cifdev);
@@ -14327,6 +15351,17 @@ static int rkcif_check_group_sync_state(struct rkcif_device *cif_dev)
 	return ret;
 }
 
+static void rkcif_quadbayer_dual_pipe_send_sof(struct rkcif_device *cif_dev)
+{
+	int i;
+
+	for (i = 0; i < cif_dev->sditf_cnt; i++) {
+		if (cif_dev->sditf[i])
+			sditf_event_inc_sof(cif_dev->sditf[i]);
+	}
+	cif_dev->stream[0].frame_idx = atomic_read(&cif_dev->sditf[0]->frm_sync_seq);
+}
+
 static void rkcif_deal_sof(struct rkcif_device *cif_dev)
 {
 	struct rkcif_stream *detect_stream = &cif_dev->stream[0];
@@ -14335,10 +15370,12 @@ static void rkcif_deal_sof(struct rkcif_device *cif_dev)
 	unsigned long flags;
 	int i = 0;
 	int ret = 0;
-	struct v4l2_subdev *sd = NULL;
-	struct rkisp_vicap_sof sof = {0};
 
-	detect_stream->fs_cnt_in_single_frame++;
+	/* Count SOF at entry to preserve fs_no_fe on early-return paths. */
+	spin_lock_irqsave(&detect_stream->vbq_lock, flags);
+	rkcif_count_sof_unpaired_loss(detect_stream);
+	spin_unlock_irqrestore(&detect_stream->vbq_lock, flags);
+
 	if ((!cif_dev->sditf[0] ||
 	     cif_dev->sditf[0]->mode.rdbk_mode >= RKISP_VICAP_RDBK_AIQ) &&
 	     cif_dev->inf_id == RKCIF_MIPI_LVDS &&
@@ -14349,14 +15386,6 @@ static void rkcif_deal_sof(struct rkcif_device *cif_dev)
 	spin_lock_irqsave(&detect_stream->fps_lock, flags);
 	detect_stream->readout.fs_timestamp = rkcif_time_get_ns(cif_dev);
 	spin_unlock_irqrestore(&detect_stream->fps_lock, flags);
-
-	rkcif_add_sensor_exp_to_kfifo(&cif_dev->stream[0]);
-	sd = get_rkisp_sd(cif_dev->sditf[0]);
-	if (sd) {
-		rkcif_get_sof_and_exp_info(cif_dev, &sof);
-		v4l2_subdev_call(sd, core, ioctl,
-				 RKISP_VICAP_CMD_SOF, &sof);
-	}
 
 	if (cif_dev->sditf[0] &&
 	    cif_dev->sditf[0]->mode.rdbk_mode >= RKISP_VICAP_RDBK_AIQ &&
@@ -14396,6 +15425,8 @@ static void rkcif_deal_sof(struct rkcif_device *cif_dev)
 				}
 				if (tmp_dev) {
 					spin_lock_irqsave(&tmp_dev->stream[0].vbq_lock, flags);
+					if (tmp_dev != cif_dev)
+						rkcif_count_sof_unpaired_loss(&tmp_dev->stream[0]);
 					if ((!tmp_dev->stream[0].thunderboot_skip_interval ||
 					    (tmp_dev->stream[0].thunderboot_skip_interval &&
 					    (tmp_dev->stream[0].frame_idx % tmp_dev->stream[0].thunderboot_skip_interval) == 0)) &&
@@ -14405,6 +15436,8 @@ static void rkcif_deal_sof(struct rkcif_device *cif_dev)
 							sditf_event_inc_sof(tmp_dev->sditf[tmp_dev->stream[0].id]);
 						else if (tmp_dev->channels[0].capture_info.mode == RKMODULE_ONE_CH_TO_MULTI_ISP)
 							schedule_work(&tmp_dev->exp_work);
+						else if (cif_dev->channels[0].capture_info.mode == RKMODULE_QUADBAYER_TO_DUAL_PIPE)
+							rkcif_quadbayer_dual_pipe_send_sof(cif_dev);
 						else
 							rkcif_send_sof(tmp_dev);
 						if (tmp_dev->stream[0].cifdev->rdbk_debug &&
@@ -14438,6 +15471,8 @@ static void rkcif_deal_sof(struct rkcif_device *cif_dev)
 				sditf_event_inc_sof(cif_dev->sditf[detect_stream->id]);
 			else if (cif_dev->channels[0].capture_info.mode == RKMODULE_ONE_CH_TO_MULTI_ISP)
 				schedule_work(&cif_dev->exp_work);
+			else if (cif_dev->channels[0].capture_info.mode == RKMODULE_QUADBAYER_TO_DUAL_PIPE)
+				rkcif_quadbayer_dual_pipe_send_sof(cif_dev);
 			else
 				rkcif_send_sof(cif_dev);
 			if ((detect_stream->cifdev->rdbk_debug &&
@@ -14448,7 +15483,9 @@ static void rkcif_deal_sof(struct rkcif_device *cif_dev)
 					  detect_stream->id,
 					  rkcif_get_sof(cif_dev),
 					  detect_stream->frame_idx);
-			if (rkcif_check_frame_active(cif_dev))
+			if (rkcif_check_frame_active(cif_dev) &&
+			    cif_dev->channels[0].capture_info.mode != RKMODULE_QUADBAYER_TO_DUAL_PIPE &&
+			    (!detect_stream->cifdev->is_in_flip))
 				detect_stream->frame_idx++;
 		}
 		spin_unlock_irqrestore(&detect_stream->vbq_lock, flags);
@@ -14636,7 +15673,7 @@ static int rkcif_subdevs_set_power(struct rkcif_device *cif_dev, int on)
 			}
 		}
 	}
-	if (is_deserializer_name(cif_dev->terminal_sensor.sd->name)) {
+	if (is_deserializer_name(cif_dev->terminal_sensor.sd)) {
 		for (i = 0; i < cif_dev->num_channels; i++) {
 			if (cif_dev->stream[i].state == RKCIF_STATE_STREAMING ||
 			    cif_dev->stream[i].state == RKCIF_STATE_RESET_IN_STREAMING) {
@@ -14740,7 +15777,7 @@ static int rkcif_sditf_sensor_set_stream(struct rkcif_device *cif_dev, int on)
 		}
 	}
 
-	if (is_deserializer_name(cif_dev->terminal_sensor.sd->name)) {
+	if (is_deserializer_name(cif_dev->terminal_sensor.sd)) {
 		for (i = 0; i < cif_dev->num_channels; i++) {
 			if (cif_dev->stream[i].state == RKCIF_STATE_STREAMING ||
 			    cif_dev->stream[i].state == RKCIF_STATE_RESET_IN_STREAMING) {
@@ -14794,7 +15831,7 @@ int rkcif_stream_suspend(struct rkcif_device *cif_dev, int mode)
 			suspend_cnt++;
 			v4l2_dbg(1, rkcif_debug, &cif_dev->v4l2_dev,
 				 "stream[%d] stopping\n", stream->id);
-			if (atomic_read(&cif_dev->sensor_off) == 0) {
+			if (!stream->is_pause_stream) {
 				stream->stopping = true;
 				ret = wait_event_timeout(stream->wq_stopped,
 							 stream->state != RKCIF_STATE_STREAMING,
@@ -14846,9 +15883,70 @@ out_suspend:
 	return 0;
 }
 
+/*
+ * Drop any partially assembled HDR readback buffers held in rdbk_rx_buf[].
+ *
+ * Lock order rule for this helper:
+ * 1) hold hdr_lock only to detach dev->rdbk_rx_buf[] to local pending[]
+ * 2) release hdr_lock
+ * 3) requeue pending[] one-by-one (requeue takes stream->vbq_lock)
+ *
+ * Must not be called while holding any stream->vbq_lock.
+ */
+static void rkcif_flush_rdbk_rx_toisp(struct rkcif_device *dev, const char *reason)
+{
+	struct sditf_priv *priv = dev->sditf[0];
+	struct rkcif_rx_buffer *pending[RDBK_MAX] = { NULL };
+	unsigned long flags;
+	int i;
+	bool need_flush = false;
+
+	if (!priv || priv->mode.rdbk_mode >= RKISP_VICAP_RDBK_AIQ)
+		return;
+	if (dev->hdr.hdr_mode != HDR_X2 && dev->hdr.hdr_mode != HDR_X3)
+		return;
+
+	for (i = 0; i < RDBK_MAX; i++) {
+		if (dev->rdbk_rx_buf[i]) {
+			need_flush = true;
+			break;
+		}
+	}
+	if (!need_flush)
+		return;
+
+	v4l2_dbg(3, rkcif_debug, &dev->v4l2_dev,
+		 "flush rdbk_rx_buf (%s): L=%d M=%d S=%d\n", reason,
+		 !!dev->rdbk_rx_buf[RDBK_L], !!dev->rdbk_rx_buf[RDBK_M],
+		 !!dev->rdbk_rx_buf[RDBK_S]);
+
+	/*
+	 * Detach under hdr_lock, then requeue without hdr_lock to avoid lock-order
+	 * inversion against normal path (vbq_lock -> hdr_lock).
+	 */
+	spin_lock_irqsave(&dev->hdr_lock, flags);
+	for (i = 0; i < RDBK_MAX; i++) {
+		if (!dev->rdbk_rx_buf[i])
+			continue;
+		pending[i] = dev->rdbk_rx_buf[i];
+		dev->rdbk_rx_buf[i] = NULL;
+	}
+	spin_unlock_irqrestore(&dev->hdr_lock, flags);
+
+	for (i = 0; i < RDBK_MAX; i++) {
+		struct rkcif_stream *s = &dev->stream[i];
+
+		if (!pending[i])
+			continue;
+		rkcif_count_loss_fe_no_out(s, 1);
+		rkcif_requeue_rx_buf_toisp(s, pending[i]);
+	}
+}
+
 static void rkcif_clean_buffer_state(struct rkcif_stream *stream)
 {
 	struct sditf_priv *priv = stream->cifdev->sditf[0];
+	struct rkcif_device *cif_dev = stream->cifdev;
 	unsigned long flags;
 
 	spin_lock_irqsave(&stream->vbq_lock, flags);
@@ -14870,25 +15968,55 @@ static void rkcif_clean_buffer_state(struct rkcif_stream *stream)
 	} else {
 		if (priv->mode.rdbk_mode < RKISP_VICAP_RDBK_AIQ) {
 			if (stream->curr_buf_toisp == stream->next_buf_toisp) {
-				if (stream->curr_buf_toisp)
-					list_add_tail(&stream->curr_buf_toisp->list, &stream->rx_buf_head);
+				if (stream->curr_buf_toisp) {
+					if (!stream->curr_buf_toisp->in_rx_list) {
+						stream->curr_buf_toisp->in_isp = false;
+						list_add_tail(&stream->curr_buf_toisp->list, &stream->rx_buf_head);
+						stream->curr_buf_toisp->in_rx_list = true;
+					}
+				}
 			} else {
-				if (stream->curr_buf_toisp)
-					list_add_tail(&stream->curr_buf_toisp->list, &stream->rx_buf_head);
-				if (stream->next_buf_toisp)
-					list_add_tail(&stream->next_buf_toisp->list, &stream->rx_buf_head);
+				if (stream->curr_buf_toisp) {
+					if (!stream->curr_buf_toisp->in_rx_list) {
+						stream->curr_buf_toisp->in_isp = false;
+						list_add_tail(&stream->curr_buf_toisp->list, &stream->rx_buf_head);
+						stream->curr_buf_toisp->in_rx_list = true;
+					}
+				}
+				if (stream->next_buf_toisp) {
+					if (!stream->next_buf_toisp->in_rx_list) {
+						stream->next_buf_toisp->in_isp = false;
+						list_add_tail(&stream->next_buf_toisp->list, &stream->rx_buf_head);
+						stream->next_buf_toisp->in_rx_list = true;
+					}
+				}
 			}
 			stream->curr_buf_toisp = NULL;
 			stream->next_buf_toisp = NULL;
 		} else {
 			if (stream->curr_buf_toisp == stream->next_buf_toisp) {
-				if (stream->curr_buf_toisp)
-					list_add_tail(&stream->curr_buf_toisp->list, &stream->rx_buf_head);
+				if (stream->curr_buf_toisp) {
+					if (!stream->curr_buf_toisp->in_rx_list) {
+						stream->curr_buf_toisp->in_isp = false;
+						list_add_tail(&stream->curr_buf_toisp->list, &stream->rx_buf_head);
+						stream->curr_buf_toisp->in_rx_list = true;
+					}
+				}
 			} else {
-				if (stream->curr_buf_toisp)
-					list_add_tail(&stream->curr_buf_toisp->list, &stream->rx_buf_head);
-				if (stream->next_buf_toisp)
-					list_add_tail(&stream->next_buf_toisp->list, &stream->rx_buf_head);
+				if (stream->curr_buf_toisp) {
+					if (!stream->curr_buf_toisp->in_rx_list) {
+						stream->curr_buf_toisp->in_isp = false;
+						list_add_tail(&stream->curr_buf_toisp->list, &stream->rx_buf_head);
+						stream->curr_buf_toisp->in_rx_list = true;
+					}
+				}
+				if (stream->next_buf_toisp) {
+					if (!stream->next_buf_toisp->in_rx_list) {
+						stream->next_buf_toisp->in_isp = false;
+						list_add_tail(&stream->next_buf_toisp->list, &stream->rx_buf_head);
+						stream->next_buf_toisp->in_rx_list = true;
+					}
+				}
 			}
 			stream->curr_buf_toisp = NULL;
 			stream->next_buf_toisp = NULL;
@@ -14896,6 +16024,14 @@ static void rkcif_clean_buffer_state(struct rkcif_stream *stream)
 	}
 
 	spin_unlock_irqrestore(&stream->vbq_lock, flags);
+
+	/*
+	 * Partial HDR readback assembly state is global; clear it whenever we reset
+	 * toisp ping-pong pointers, otherwise stop/start DMA can strand rdbk_rx_buf[]
+	 * and stall further ISP submissions.
+	 */
+	if (priv && priv->mode.rdbk_mode < RKISP_VICAP_RDBK_AIQ)
+		rkcif_flush_rdbk_rx_toisp(cif_dev, "clean_buffer_state");
 }
 
 int rkcif_stream_resume(struct rkcif_device *cif_dev, int mode)
@@ -15054,6 +16190,7 @@ int rkcif_stream_resume(struct rkcif_device *cif_dev, int mode)
 		if (ret)
 			v4l2_err(&cif_dev->v4l2_dev, "%s:resume stream[%d] failed\n",
 				 __func__, stream->id);
+		stream->is_pause_stream = false;
 
 		resume_cnt++;
 		stream->cur_skip_frame = stream->skip_frame;
@@ -15218,8 +16355,10 @@ static void rkcif_check_mipi_interlaced_frame_id(struct rkcif_stream *stream)
 		 stream->id, fs_interlaced_phase, frame_id);
 	if (stream->last_fs_interlaced_phase == 0) {
 		buffer = stream->curr_buf;
-		rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME0_READY, buf_offset);
-		rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME1_READY, buf_offset);
+		if (buffer) {
+			rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME0_READY, buf_offset);
+			rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME1_READY, buf_offset);
+		}
 	} else {
 		if (fs_interlaced_phase == CIF_CSI_FRAME0_READY) {
 			buffer = stream->curr_buf;
@@ -15235,12 +16374,16 @@ static void rkcif_check_mipi_interlaced_frame_id(struct rkcif_stream *stream)
 						 "stream[%d] mipi fs interlace bad frame queue, phase %d, line %d\n",
 						 stream->id, fs_interlaced_phase, __LINE__);
 				}
-				rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME0_READY, buf_offset);
-				rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME1_READY, buf_offset);
+				if (buffer) {
+					rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME0_READY, buf_offset);
+					rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME1_READY, buf_offset);
+				}
 			} else if (stream->last_fs_interlaced_phase == CIF_CSI_FRAME0_READY) {
 				stream->interlaced_bad_frame = true;
-				rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME0_READY, buf_offset);
-				rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME1_READY, buf_offset);
+				if (buffer) {
+					rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME0_READY, buf_offset);
+					rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME1_READY, buf_offset);
+				}
 				v4l2_dbg(rkcif_debug, 3, &dev->v4l2_dev,
 					 "stream[%d] mipi fs interlace bad frame, phase %d, line %d\n",
 					 stream->id, fs_interlaced_phase, __LINE__);
@@ -15248,11 +16391,10 @@ static void rkcif_check_mipi_interlaced_frame_id(struct rkcif_stream *stream)
 		} else {
 			if (stream->last_fs_interlaced_phase == CIF_CSI_FRAME0_READY) {
 				if (stream->next_buf) {
-					if (stream->curr_buf) {
+					if (stream->curr_buf)
 						rkcif_buf_queue(&stream->curr_buf->vb.vb2_buf);
-						stream->curr_buf = stream->next_buf;
-						stream->next_buf = NULL;
-					}
+					stream->curr_buf = stream->next_buf;
+					stream->next_buf = NULL;
 					stream->interlaced_bad_frame = true;
 					v4l2_dbg(rkcif_debug, 3, &dev->v4l2_dev,
 						 "stream[%d] mipi fs interlace bad frame, phase %d\n",
@@ -15269,8 +16411,7 @@ static void rkcif_check_mipi_interlaced_frame_id(struct rkcif_stream *stream)
 				if (buffer) {
 					rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME0_READY, buf_offset);
 					rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME1_READY, buf_offset);
-				} else if (dummy_buf->vaddr) {
-					stream->interlaced_bad_frame = true;
+				} else if (dummy_buf->is_allocated) {
 					rkcif_write_buffer(stream, NULL, CIF_CSI_FRAME0_READY, buf_offset);
 					rkcif_write_buffer(stream, NULL, CIF_CSI_FRAME1_READY, buf_offset);
 					v4l2_dbg(rkcif_debug, 3, &dev->v4l2_dev,
@@ -15301,10 +16442,9 @@ static void rkcif_check_mipi_interlaced_frame_id(struct rkcif_stream *stream)
 					buffer = stream->curr_buf;
 					rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME0_READY, buf_offset);
 					rkcif_write_buffer(stream, buffer, CIF_CSI_FRAME1_READY, buf_offset);
-				} else if (dummy_buf->vaddr) {
+				} else if (dummy_buf->is_allocated) {
 					rkcif_write_buffer(stream, NULL, CIF_CSI_FRAME0_READY, buf_offset);
 					rkcif_write_buffer(stream, NULL, CIF_CSI_FRAME1_READY, buf_offset);
-					stream->interlaced_bad_frame = true;
 					v4l2_dbg(rkcif_debug, 3, &dev->v4l2_dev,
 						 "stream[%d] mipi interlace not buf, use dummy buf, line %d\n",
 						 stream->id, __LINE__);
@@ -15377,6 +16517,61 @@ void rkcif_update_unite_extend_pixel(struct rkcif_device *cif_dev)
 			 &cif_dev->unite_extend_pixel);
 }
 
+static int rkcif_get_next_effect_stream_id(struct rkcif_device *dev, u32 effect_frame, bool *is_change)
+{
+	u32 i = 0, pattern_cnt = 0, tmp = 0;
+	int id = 0;
+
+	for (i = 0; i < dev->channels[0].capture_info.one_to_multi.isp_num; i++)
+		pattern_cnt += dev->channels[0].capture_info.one_to_multi.frame_pattern[i];
+
+	if (pattern_cnt == 0)
+		return -EINVAL;
+	tmp = effect_frame % pattern_cnt;
+	pattern_cnt = 0;
+	for (i = 0; i < dev->channels[0].capture_info.one_to_multi.isp_num; i++) {
+		pattern_cnt += dev->channels[0].capture_info.one_to_multi.frame_pattern[i];
+		if (tmp < pattern_cnt) {
+			id = i;
+			break;
+		}
+		if (tmp == pattern_cnt) {
+			id = (i + 1) % dev->channels[0].capture_info.one_to_multi.isp_num;
+			break;
+		}
+	}
+	if (id != dev->prev_id)
+		*is_change = true;
+	else
+		*is_change = false;
+	dev->prev_id = id;
+	return id;
+}
+
+static void rkcif_sync_sof_to_isp(struct rkcif_stream *stream)
+{
+	struct rkcif_device *cif_dev = stream->cifdev;
+	struct v4l2_subdev *sd = NULL;
+	struct rkisp_vicap_sof sof = {0};
+
+	if (!cif_dev->sditf[0])
+		return;
+	if ((cif_dev->hdr.hdr_mode == NO_HDR && stream->id != 0) ||
+	    (cif_dev->hdr.hdr_mode == HDR_X2 && stream->id != 1) ||
+	    (cif_dev->hdr.hdr_mode == HDR_X3 && stream->id != 2))
+		return;
+
+	if (cif_dev->chip_id >= CHIP_RK3576_CIF) {
+		rkcif_add_sensor_exp_to_kfifo(&cif_dev->stream[0]);
+		sd = get_rkisp_sd(cif_dev->sditf[0]);
+		if (sd) {
+			rkcif_get_sof_and_exp_info(cif_dev, &sof);
+			v4l2_subdev_call(sd, core, ioctl,
+					 RKISP_VICAP_CMD_SOF, &sof);
+		}
+	}
+}
+
 /* pingpong irq for rk3588 and next */
 void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 {
@@ -15391,6 +16586,8 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 	int tmp_csi_host_idx = 0;
 	struct rkcif_stream *last_stream = NULL;
 	struct rkcif_stream *buf_stream = NULL;
+	int next_effect_id;
+	bool is_id_change;
 
 	if (!cif_dev->active_sensor)
 		return;
@@ -15430,8 +16627,20 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 			}
 			cif_dev->irq_stats.csi_size_err_cnt++;
 			cif_dev->err_state |= RKCIF_ERR_SIZE;
-			if (cif_dev->sditf[0] && cif_dev->sditf[0]->mode.rdbk_mode < RKISP_VICAP_RDBK_AIQ)
+			if (cif_dev->sditf[0] &&
+			    cif_dev->sditf[0]->mode.rdbk_mode < RKISP_VICAP_RDBK_AIQ) {
+				/*
+				 * Defer immediate MIPI reset; reuse is_toisp_reset
+				 * (RKISP_VICAP_CMD_SET_RESET). Monitor picks it up in
+				 * rkcif_detect_reset_event() as RKCIF_RESET_SRC_ERR_ISP;
+				 * cleared in rkcif_init_reset_work() and on stream on.
+				 */
+				WRITE_ONCE(cif_dev->is_toisp_reset, true);
+				v4l2_dbg(3, rkcif_debug, &cif_dev->v4l2_dev,
+					 "csi size err: request toisp reset via monitor\n");
 				return;
+			}
+
 			if (cif_dev->channels[0].capture_info.mode == RKMODULE_MULTI_DEV_COMBINE_ONE) {
 				tmp_csi_host_idx = cif_dev->csi_host_idx;
 				for (i = 0; i < channel->capture_info.multi_dev.dev_num; i++) {
@@ -15492,14 +16701,16 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 					 atomic_read(&cif_dev->sensor_off));
 				if (cif_dev->switch_info.is_active) {
 					stream = &cif_dev->stream[mipi_id];
-					if (atomic_read(&cif_dev->switch_info.switch_dev->sensor_off) == 0) {
+					if (atomic_read(&cif_dev->switch_info.switch_dev->sensor_off) == 0 ||
+					    cif_dev->resume_mode == RKISP_RTT_MODE_ONE_FRAME) {
 						cif_dev->switch_info.is_active = false;
 						cif_dev->switch_info.switch_dev->switch_info.is_active = true;
 						rkcif_switch_change(cif_dev, !!cif_dev->switch_info.switch_dev->switch_info.gpio_val);
 					}
 				} else {
 					stream = &cif_dev->switch_info.switch_dev->stream[mipi_id];
-					if (atomic_read(&cif_dev->sensor_off) == 0) {
+					if (atomic_read(&cif_dev->sensor_off) == 0 ||
+					    cif_dev->resume_mode == RKISP_RTT_MODE_ONE_FRAME) {
 						cif_dev->switch_info.is_active = true;
 						cif_dev->switch_info.switch_dev->switch_info.is_active = false;
 						rkcif_switch_change(cif_dev, !!cif_dev->switch_info.gpio_val);
@@ -15546,6 +16757,11 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 				intstat &= ~CSI_FRAME_END_ID3;
 				break;
 			}
+			if (cif_dev->channels[0].capture_info.mode == RKMODULE_ONE_CH_TO_MULTI_ISP &&
+			    cif_dev->channels[0].capture_info.one_to_multi.exp_mode == RKMODULE_ONE_TO_MULT_EXP_SINGLE) {
+				next_effect_id = rkcif_get_next_effect_stream_id(cif_dev, stream->frame_idx, &is_id_change);
+				//custom todo
+			}
 			if (stream->low_latency)
 				rkcif_fence_signal(stream);
 			if (stream->cifdev->rdbk_debug &&
@@ -15564,24 +16780,9 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 				continue;
 			}
 
-			if (stream->is_finish_stop_dma && stream->is_wait_stop_complete) {
-				stream->is_wait_stop_complete = false;
-				stream->is_pause_stream = true;
-				complete(&stream->stop_complete);
-			}
-
-			if (stream->is_finish_stop_dma)
-				stream->is_finish_stop_dma = false;
-
 			if (stream->crop_dyn_en)
 				rkcif_dynamic_crop(stream);
 
-			if ((stream->frame_idx - stream->last_frame_idx - 1) != 0) {
-				stream->frame_loss += (stream->frame_idx - stream->last_frame_idx - 1);
-				v4l2_dbg(3, rkcif_debug, &cif_dev->v4l2_dev,
-					 "cur_frame_idx %d, last_frame_idx %d, frame loss %d\n",
-					 stream->frame_idx, stream->last_frame_idx, stream->frame_loss);
-			}
 			if (stream->dma_en & RKCIF_DMAEN_BY_VICAP) {
 				if (cif_dev->sync_cfg.type == NO_SYNC_MODE ||
 				    cif_dev->sync_cfg.type == SOFT_SYNC_MODE ||
@@ -15597,6 +16798,8 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 						rkcif_update_stream_interlace(cif_dev, stream, mipi_id);
 					else
 						rkcif_update_stream(cif_dev, stream, mipi_id);
+				} else {
+					rkcif_count_loss_fe_no_out(stream, 1);
 				}
 			} else if (stream->dma_en & RKCIF_DMAEN_BY_ISP) {
 				v4l2_dbg(4, rkcif_debug, &cif_dev->v4l2_dev,
@@ -15610,6 +16813,8 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 					is_update = rkcif_check_buffer_prepare(stream);
 				if (is_update)
 					rkcif_update_stream_toisp(cif_dev, stream, mipi_id);
+				else
+					rkcif_count_loss_fe_no_out(stream, 1);
 			} else if (stream->dma_en & RKCIF_DMAEN_BY_ROCKIT) {
 				v4l2_dbg(4, rkcif_debug, &cif_dev->v4l2_dev,
 					 "dma capture by rockit, dma_en 0x%x\n",
@@ -15630,6 +16835,8 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 					else if (stream->dma_en & RKCIF_DMAEN_BY_ROCKIT)
 						stream->dma_en &= ~RKCIF_DMAEN_BY_ROCKIT;
 					atomic_inc(&stream->cifdev->streamoff_cnt);
+					stream->is_pause_stream = true;
+					stream->is_hold_stream_off = true;
 					v4l2_dbg(4, rkcif_debug, &cif_dev->v4l2_dev,
 						 "%s %d, switch stream %d\n", __func__, __LINE__,
 						 atomic_read(&cif_dev->hw_dev->switch_stream_cnt[cif_dev->switch_info.host_idx]));
@@ -15641,7 +16848,16 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 					else if (stream->dma_en & RKCIF_DMAEN_BY_ROCKIT)
 						stream->to_stop_dma = RKCIF_DMAEN_BY_ROCKIT;
 					rkcif_stop_dma_capture(stream);
+					v4l2_dbg(4, rkcif_debug, &cif_dev->v4l2_dev,
+						 "%s %d, stream[%d] dma stop\n", __func__, __LINE__,
+						 stream->id);
+					stream->is_pause_stream = true;
+					stream->is_hold_stream_off = true;
 				}
+				if (stream->cifdev->switch_info.is_use_switch)
+					v4l2_dbg(5, rkcif_debug, &stream->cifdev->v4l2_dev,
+						 "%s %d, switch dec cnt %d\n", __func__, __LINE__,
+						 atomic_read(&stream->cifdev->hw_dev->switch_stream_cnt[stream->cifdev->switch_info.host_idx]));
 				if (cif_dev->hdr.hdr_mode == HDR_X2)
 					last_stream = &stream->cifdev->stream[1];
 				else if (cif_dev->hdr.hdr_mode == HDR_X3)
@@ -15660,16 +16876,20 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 						stream->cifdev->sensor_work.on = 0;
 						atomic_inc(&stream->cifdev->sensor_off);
 						schedule_work(&stream->cifdev->sensor_work.work);
+						if (cif_dev->switch_info.is_use_switch)
+							v4l2_dbg(5, rkcif_debug, &stream->cifdev->v4l2_dev,
+								 "%s %d, switch dec cnt %d\n", __func__, __LINE__,
+								 atomic_read(&cif_dev->hw_dev->switch_stream_cnt[cif_dev->switch_info.host_idx]));
 					}
 				} else {
 					last_stream->is_wait_single_cap = false;
 					cif_dev->resume_mode = RKISP_RTT_MODE_MULTI_FRAME;
 					complete(&stream->start_complete);
 					spin_unlock_irqrestore(&stream->cifdev->stream_spinlock, flags);
-					if (cif_dev->switch_info.is_use_switch)
-						atomic_inc(&cif_dev->hw_dev->switch_stream_cnt[cif_dev->switch_info.host_idx]);
 				}
-			} else if (buf_stream->lack_buf_cnt == 2 && !stream->cur_skip_frame) {
+			} else if (buf_stream->lack_buf_cnt == 2 && !stream->cur_skip_frame &&
+				   stream->is_detect_lack_buf &&
+				   !buf_stream->is_single_buf_mode) {
 				spin_unlock_irqrestore(&stream->cifdev->stream_spinlock, flags);
 				if (stream->dma_en & RKCIF_DMAEN_BY_ISP)
 					stream->to_stop_dma = RKCIF_DMAEN_BY_ISP;
@@ -15678,9 +16898,20 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 				else if (stream->dma_en & RKCIF_DMAEN_BY_ROCKIT)
 					stream->to_stop_dma = RKCIF_DMAEN_BY_ROCKIT;
 				rkcif_stop_dma_capture(stream);
+				v4l2_dbg(4, rkcif_debug, &cif_dev->v4l2_dev,
+					 "%s %d, stream[%d] dma stop\n", __func__, __LINE__,
+					 stream->id);
 			} else {
 				spin_unlock_irqrestore(&stream->cifdev->stream_spinlock, flags);
 			}
+
+			if (stream->is_finish_stop_dma && stream->is_wait_stop_complete) {
+				stream->is_wait_stop_complete = false;
+				complete(&stream->stop_complete);
+			}
+
+			if (stream->is_finish_stop_dma)
+				stream->is_finish_stop_dma = false;
 
 			if (cif_dev->chip_id >= CHIP_RV1106_CIF)
 				rkcif_modify_frame_skip_config(stream);
@@ -15708,15 +16939,46 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 						stream->is_fs_fe_not_paired = true;
 					}
 					stream->fs_cnt_in_single_frame = 0;
-				} else {
+				} else if (stream->fs_cnt_in_single_frame > 0) {
 					stream->fs_cnt_in_single_frame--;
 				}
+			} else if (stream->fs_cnt_in_single_frame > 0) {
+				stream->fs_cnt_in_single_frame--;
 			}
 			rkcif_monitor_reset_event(cif_dev);
 			cif_dev->irq_stats.frm_end_cnt[stream->id]++;
 			rkcif_check_one_to_multi_sub_stream_stop_state(cif_dev);
 		}
 		for (i = 0; i < RKCIF_MAX_STREAM_MIPI; i++) {
+			if (intstat & CSI_LINE_INTSTAT_V1(i)) {
+				if (cif_dev->switch_info.is_use_switch) {
+					if (cif_dev->switch_info.is_active)
+						stream = &cif_dev->stream[i];
+					else
+						stream = &cif_dev->switch_info.switch_dev->stream[i];
+				} else {
+					stream = &cif_dev->stream[i];
+				}
+				if (stream->state != RKCIF_STATE_STREAMING)
+					continue;
+				if (stream->is_line_inten) {
+					stream->line_int_cnt++;
+					if (cif_dev->rdbk_debug > 1 &&
+					    stream->frame_idx < 15)
+						v4l2_info(&cif_dev->v4l2_dev,
+							  "stream[%d] line int %lld\n",
+							  stream->id, stream->line_int_cnt);
+					if (cif_dev->sditf[0] && (cif_dev->sditf[0]->mode.rdbk_mode == RKISP_VICAP_RDBK_AUTO ||
+					    cif_dev->sditf[0]->mode.rdbk_mode == RKISP_VICAP_RDBK_AUTO_ONE_FRAME))
+						rkcif_line_wake_up_rdbk(stream, stream->id);
+					else if (rkcif_get_interlace_mode(stream) == RKCIF_INTERLACE_SOFT_AUTO)
+						rkcif_line_wake_up_interlace(stream, stream->id);
+					else
+						rkcif_line_wake_up(stream, stream->id);
+				}
+				v4l2_dbg(3, rkcif_debug, &cif_dev->v4l2_dev,
+					 "%s: id0 cur line:%d\n", __func__, lastline & 0x3fff);
+			}
 			if (intstat & (cif_dev->chip_id < CHIP_RK3576_CIF ?
 			    CSI_START_INTSTAT(i) : CSI_START_INTSTAT_RK3576(i))) {
 				if (cif_dev->switch_info.is_use_switch) {
@@ -15736,6 +16998,9 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 					else if (stream->dma_en & RKCIF_DMAEN_BY_ISP)
 						stream->to_stop_dma = RKCIF_DMAEN_BY_ISP;
 					stream->is_stop_capture = true;
+					v4l2_dbg(4, rkcif_debug, &cif_dev->v4l2_dev,
+						 "%s %d, stream[%d] dma stop\n", __func__, __LINE__,
+						 stream->id);
 				}
 				if (stream->to_stop_dma) {
 					if (cif_dev->switch_info.is_use_switch &&
@@ -15744,21 +17009,25 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 						stream->is_finish_stop_dma = true;
 					} else {
 						ret = rkcif_stop_dma_capture(stream);
-						if (!ret) {
+						if (!ret)
 							stream->is_finish_stop_dma = true;
-							if (stream->is_wait_stop_complete)
-								stream->is_pause_stream = true;
-						}
 					}
+					if (cif_dev->switch_info.is_use_switch)
+						v4l2_dbg(5, rkcif_debug, &cif_dev->v4l2_dev,
+							 "%s %d, switch dec cnt %d\n", __func__, __LINE__,
+							 atomic_read(&cif_dev->hw_dev->switch_stream_cnt[cif_dev->switch_info.host_idx]));
 				}
 				spin_unlock_irqrestore(&stream->vbq_lock, flags);
 
 				if (stream->dma_en || cif_dev->chip_id >= CHIP_RK3576_CIF) {
 					if (i == 0) {
 						spin_lock_irqsave(&stream->vbq_lock, flags);
-						if (!stream->cur_skip_frame && (!cif_dev->is_in_flip)) {
+						if (stream->cifdev->is_in_flip)
+							stream->real_skip_num++;
+						if (!stream->cur_skip_frame && (!stream->cifdev->is_in_flip)) {
 							spin_unlock_irqrestore(&stream->vbq_lock, flags);
 							rkcif_deal_sof(stream->cifdev);
+							rkcif_sync_sof_to_isp(stream);
 						} else {
 							spin_unlock_irqrestore(&stream->vbq_lock, flags);
 						}
@@ -15769,9 +17038,13 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 							stream->frame_idx = cif_dev->stream[0].frame_idx;
 						else
 							stream->frame_idx++;
+						rkcif_count_sof_unpaired_loss(stream);
+						rkcif_sync_sof_to_isp(stream);
 						if (cif_dev->channels[0].capture_info.mode == RKMODULE_MULTI_CH_TO_MULTI_ISP &&
 						    cif_dev->sditf[stream->id])
 							sditf_event_inc_sof(cif_dev->sditf[stream->id]);
+						if (stream->cifdev->is_in_flip)
+							stream->real_skip_num++;
 						spin_unlock_irqrestore(&stream->fps_lock, flags);
 					}
 				}
@@ -15780,35 +17053,6 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 					rkcif_enable_dma_capture(stream, false);
 				if (rkcif_get_interlace_mode(stream) == RKCIF_INTERLACE_SOFT_AUTO)
 					rkcif_check_mipi_interlaced_frame_id(stream);
-			}
-			if (intstat & CSI_LINE_INTSTAT_V1(i)) {
-				if (cif_dev->switch_info.is_use_switch) {
-					if (cif_dev->switch_info.is_active)
-						stream = &cif_dev->stream[i];
-					else
-						stream = &cif_dev->switch_info.switch_dev->stream[i];
-				} else {
-					stream = &cif_dev->stream[i];
-				}
-				if (stream->state != RKCIF_STATE_STREAMING)
-					continue;
-				if (stream->is_line_inten) {
-					stream->line_int_cnt++;
-					if (cif_dev->rdbk_debug > 1 &&
-					    stream->frame_idx < 15)
-						v4l2_info(&cif_dev->v4l2_dev,
-							  "line int %lld\n",
-							  stream->line_int_cnt);
-					if (cif_dev->sditf[0] && (cif_dev->sditf[0]->mode.rdbk_mode == RKISP_VICAP_RDBK_AUTO ||
-					    cif_dev->sditf[0]->mode.rdbk_mode == RKISP_VICAP_RDBK_AUTO_ONE_FRAME))
-						rkcif_line_wake_up_rdbk(stream, stream->id);
-					else if (rkcif_get_interlace_mode(stream) == RKCIF_INTERLACE_SOFT_AUTO)
-						rkcif_line_wake_up_interlace(stream, stream->id);
-					else
-						rkcif_line_wake_up(stream, stream->id);
-				}
-				v4l2_dbg(3, rkcif_debug, &cif_dev->v4l2_dev,
-					 "%s: id0 cur line:%d\n", __func__, lastline & 0x3fff);
 			}
 		}
 	} else {
@@ -15908,11 +17152,14 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 					is_update = rkcif_check_buffer_prepare(stream);
 				if (is_update)
 					rkcif_update_stream(cif_dev, stream, ch_id);
+				else
+					rkcif_count_loss_fe_no_out(stream, 1);
 			} else if (stream->dma_en & RKCIF_DMAEN_BY_ISP) {
 				rkcif_update_stream_toisp(cif_dev, stream, ch_id);
 			} else if (stream->dma_en & RKCIF_DMAEN_BY_ROCKIT) {
 				rkcif_update_stream_rockit(cif_dev, stream, ch_id);
 			}
+			stream->last_frame_idx = stream->frame_idx;
 
 			if (stream->to_en_dma)
 				rkcif_enable_dma_capture(stream, false);
@@ -15934,6 +17181,7 @@ void rkcif_irq_pingpong_v1(struct rkcif_device *cif_dev)
 					spin_lock_irqsave(&stream->fps_lock, flags);
 					stream->readout.fs_timestamp = rkcif_time_get_ns(cif_dev);
 					stream->frame_idx++;
+					rkcif_count_sof_unpaired_loss(stream);
 					spin_unlock_irqrestore(&stream->fps_lock, flags);
 				}
 				stream->is_in_vblank = false;
@@ -16055,6 +17303,7 @@ void rkcif_irq_pingpong(struct rkcif_device *cif_dev)
 				rkcif_update_stream_interlace(cif_dev, stream, mipi_id);
 			else
 				rkcif_update_stream(cif_dev, stream, mipi_id);
+			stream->last_frame_idx = stream->frame_idx;
 			rkcif_detect_wake_up_mode_change(stream);
 			rkcif_monitor_reset_event(cif_dev);
 			if (mipi_id == RKCIF_STREAM_MIPI_ID0) {
@@ -16063,9 +17312,11 @@ void rkcif_irq_pingpong(struct rkcif_device *cif_dev)
 					cif_dev->err_state |= RKCIF_ERR_ID0_MULTI_FS;
 					detect_stream->is_fs_fe_not_paired = true;
 					detect_stream->fs_cnt_in_single_frame = 0;
-				} else {
+				} else if (detect_stream->fs_cnt_in_single_frame > 0) {
 					detect_stream->fs_cnt_in_single_frame--;
 				}
+			} else if (stream->fs_cnt_in_single_frame > 0) {
+				stream->fs_cnt_in_single_frame--;
 			}
 			cif_dev->irq_stats.frm_end_cnt[stream->id]++;
 			rkcif_check_one_to_multi_sub_stream_stop_state(cif_dev);
@@ -16080,6 +17331,7 @@ void rkcif_irq_pingpong(struct rkcif_device *cif_dev)
 					spin_lock_irqsave(&stream->fps_lock, flags);
 					stream->readout.fs_timestamp = rkcif_time_get_ns(cif_dev);
 					stream->frame_idx++;
+					rkcif_count_sof_unpaired_loss(stream);
 					if (cif_dev->channels[0].capture_info.mode == RKMODULE_MULTI_CH_TO_MULTI_ISP &&
 					    cif_dev->sditf[stream->id])
 						sditf_event_inc_sof(cif_dev->sditf[stream->id]);

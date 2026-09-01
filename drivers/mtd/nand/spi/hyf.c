@@ -13,7 +13,6 @@
 #define SPINAND_MFR_HYF		0xC9
 
 static SPINAND_OP_VARIANTS(read_cache_variants,
-		SPINAND_PAGE_READ_FROM_CACHE_QUADIO_OP(0, 2, NULL, 0),
 		SPINAND_PAGE_READ_FROM_CACHE_X4_OP(0, 1, NULL, 0),
 		SPINAND_PAGE_READ_FROM_CACHE_DUALIO_OP(0, 1, NULL, 0),
 		SPINAND_PAGE_READ_FROM_CACHE_X2_OP(0, 1, NULL, 0),
@@ -255,6 +254,25 @@ static const struct spinand_info hyf_spinand_table[] = {
 					      &update_cache_variants),
 		     SPINAND_HAS_QE_BIT,
 		     SPINAND_ECCINFO(&hyf4gq4uaacbe_ooblayout, hyf1gq4udacae_ecc_get_status)),
+	SPINAND_INFO("HYFQ512NAC",
+		     SPINAND_ID(SPINAND_READID_METHOD_OPCODE_ADDR, 0x2B),
+		     NAND_MEMORG(1, 2048, 64, 64, 512, 10, 1, 1, 1),
+		     NAND_ECCREQ(4, 512),
+		     SPINAND_INFO_OP_VARIANTS(&read_cache_variants,
+					      &write_cache_variants,
+					      &update_cache_variants),
+		     SPINAND_HAS_QE_BIT,
+		     SPINAND_ECCINFO(&hyf1gq4udacae_ooblayout, hyf1gq4udacae_ecc_get_status)),
+	SPINAND_INFO("HYF8GQ4UACCAE",
+		     SPINAND_ID(SPINAND_READID_METHOD_OPCODE_ADDR, 0x58),
+		     NAND_MEMORG(1, 2048, 128, 64, 8192, 40, 1, 1, 1),
+		     NAND_ECCREQ(14, 512),
+		     SPINAND_INFO_OP_VARIANTS(&read_cache_variants,
+					      &write_cache_variants,
+					      &update_cache_variants),
+		     SPINAND_HAS_QE_BIT,
+		     SPINAND_ECCINFO(&hyf2gq4uaacae_ooblayout,
+				     hyf1gq4udacae_ecc_get_status)),
 };
 
 static const struct spinand_manufacturer_ops hyf_spinand_manuf_ops = {

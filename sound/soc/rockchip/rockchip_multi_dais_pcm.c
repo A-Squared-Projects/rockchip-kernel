@@ -172,7 +172,7 @@ static void dmaengine_mpcm_dma_complete(void *arg)
 	drd = substream_to_drd(substream);
 	dlp = drd->parent;
 
-	dlp_dma_complete(dlp, drd);
+	dlp_dma_complete(dlp, drd, substream);
 	snd_pcm_stream_unlock_irq(substream);
 
 	snd_pcm_period_elapsed(substream);
@@ -550,7 +550,7 @@ static int dmaengine_mpcm_trcm_dma_guard_ctrl(struct snd_soc_component *componen
 
 		desc = dmaengine_prep_dma_cyclic(chans[i], guards[i].dma_addr,
 						 buf_sz, buf_sz, direction,
-						 DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
+						 DMA_CTRL_ACK);
 		if (!desc)
 			return -ENOMEM;
 

@@ -235,6 +235,12 @@ struct rockchip_sfc {
 	struct rockchip_sfc_data *data;
 };
 
+static inline bool is_invalid_id(const u8 *id)
+{
+	return ((0xFF == id[0] && 0xFF == id[1]) ||
+		(0x00 == id[0] && 0x00 == id[1]));
+}
+
 static int rockchip_sfc_reset(struct rockchip_sfc *sfc)
 {
 	int err;
@@ -709,16 +715,23 @@ static void rockchip_sfc_delay_lines_tuning(struct rockchip_sfc *sfc, struct spi
 	bool dll_valid = false;
 	u8 cs = mem->spi->chip_select;
 
+	rockchip_sfc_set_delay_lines(sfc, 0, cs);
 	rockchip_sfc_clk_set_rate(sfc, SFC_DLL_THRESHOLD_RATE);
 	op.data.buf.in = &id;
 	rockchip_sfc_exec_op_bypass(sfc, mem, &op);
-	if ((0xFF == id[0] && 0xFF == id[1]) ||
-	    (0x00 == id[0] && 0x00 == id[1])) {
-		dev_dbg(sfc->dev, "no dev, dll by pass\n");
-		rockchip_sfc_clk_set_rate(sfc, sfc->speed[cs]);
-		sfc->speed[cs] = SFC_DLL_THRESHOLD_RATE;
+	if (is_invalid_id(id)) {
+		/* Some SPI Nands only support access via addr 0.*/
+		op.addr.nbytes = 1;
+		op.addr.val = 0;
+		op.addr.buswidth = 1;
+		rockchip_sfc_exec_op_bypass(sfc, mem, &op);
+		if (is_invalid_id(id)) {
+			dev_dbg(sfc->dev, "no dev, dll by pass\n");
+			rockchip_sfc_clk_set_rate(sfc, sfc->speed[cs]);
+			sfc->speed[cs] = SFC_DLL_THRESHOLD_RATE;
 
-		return;
+			return;
+		}
 	}
 
 	rockchip_sfc_clk_set_rate(sfc, sfc->speed[cs]);
@@ -937,6 +950,14 @@ static const struct rockchip_sfc_data rk3506_fspi_data = {
 	},
 };
 
+static const struct rockchip_sfc_data rk3538_fspi_data = {
+	.powergood = {
+		.valid = true,
+		.grf_offset = 0x170,
+		.bits_mask = BIT(0),
+	},
+};
+
 static const struct rockchip_sfc_data rv1126b_fspi_data = {
 	.powergood = {
 		.valid = true,
@@ -948,6 +969,7 @@ static const struct rockchip_sfc_data rv1126b_fspi_data = {
 static const struct of_device_id rockchip_sfc_dt_ids[] = {
 	{ .compatible = "rockchip,fspi",},
 	{ .compatible = "rockchip,rk3506-fspi", .data = &rk3506_fspi_data},
+	{ .compatible = "rockchip,rk3538-fspi", .data = &rk3538_fspi_data},
 	{ .compatible = "rockchip,rv1126b-fspi", .data = &rv1126b_fspi_data},
 	{ .compatible = "rockchip,sfc"},
 	{ /* sentinel */ }

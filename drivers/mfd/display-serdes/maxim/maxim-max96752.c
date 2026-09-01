@@ -27,113 +27,6 @@ static struct regmap_config max96752_regmap_config = {
 	.rd_table = &max96752_readable_table,
 };
 
-struct config_desc {
-	u16 reg;
-	u8 mask;
-	u8 val;
-};
-
-struct serdes_group_data {
-	const struct config_desc *configs;
-	int num_configs;
-};
-
-static int MAX96752_GPIO0_pins[] = {0};
-static int MAX96752_GPIO1_pins[] = {1};
-static int MAX96752_GPIO2_pins[] = {2};
-static int MAX96752_GPIO3_pins[] = {3};
-static int MAX96752_GPIO4_pins[] = {4};
-static int MAX96752_GPIO5_pins[] = {5};
-static int MAX96752_GPIO6_pins[] = {6};
-static int MAX96752_GPIO7_pins[] = {7};
-
-static int MAX96752_GPIO8_pins[] = {8};
-static int MAX96752_GPIO9_pins[] = {9};
-static int MAX96752_GPIO10_pins[] = {10};
-static int MAX96752_GPIO11_pins[] = {11};
-static int MAX96752_GPIO12_pins[] = {12};
-static int MAX96752_GPIO13_pins[] = {13};
-static int MAX96752_GPIO14_pins[] = {14};
-static int MAX96752_GPIO15_pins[] = {15};
-
-#define GROUP_DESC(nm) \
-{ \
-	.name = #nm, \
-	.pins = nm ## _pins, \
-	.num_pins = ARRAY_SIZE(nm ## _pins), \
-}
-
-struct serdes_function_data {
-	u8 gpio_out_dis:1;
-	u8 gpio_tx_en:1;
-	u8 gpio_rx_en:1;
-	u8 gpio_in_level:1;
-	u8 gpio_out_level:1;
-	u8 gpio_tx_id;
-	u8 gpio_rx_id;
-	u16 mdelay;
-};
-
-static const char *serdes_gpio_groups[] = {
-	"MAX96752_GPIO0", "MAX96752_GPIO1", "MAX96752_GPIO2", "MAX96752_GPIO3",
-	"MAX96752_GPIO4", "MAX96752_GPIO5", "MAX96752_GPIO6", "MAX96752_GPIO7",
-
-	"MAX96752_GPIO8", "MAX96752_GPIO9", "MAX96752_GPIO10", "MAX96752_GPIO11",
-	"MAX96752_GPIO12", "MAX96752_GPIO13", "MAX96752_GPIO14", "MAX96752_GPIO15",
-};
-
-#define FUNCTION_DESC_GPIO_INPUT_BYPASS(id) \
-{ \
-	.name = "SER_TO_DES_RXID"#id, \
-	.group_names = serdes_gpio_groups, \
-	.num_group_names = ARRAY_SIZE(serdes_gpio_groups), \
-	.data = (void *)(const struct serdes_function_data []) { \
-		{ .gpio_rx_en = 1, .gpio_rx_id = id } \
-	}, \
-} \
-
-#define FUNCTION_DESC_GPIO_OUTPUT_BYPASS(id) \
-{ \
-	.name = "DES_TXID"#id"_TO_SER", \
-	.group_names = serdes_gpio_groups, \
-	.num_group_names = ARRAY_SIZE(serdes_gpio_groups), \
-	.data = (void *)(const struct serdes_function_data []) { \
-		{ .gpio_out_dis = 1, .gpio_tx_en = 1, .gpio_tx_id = id } \
-	}, \
-} \
-
-#define FUNCTION_DESC_GPIO_OUTPUT_LOW(id) \
-{ \
-	.name = "DES_TXID"#id"_OUTPUT_LOW", \
-	.group_names = serdes_gpio_groups, \
-	.num_group_names = ARRAY_SIZE(serdes_gpio_groups), \
-	.data = (void *)(const struct serdes_function_data []) { \
-		{ .gpio_out_dis = 0, .gpio_tx_en = 0, \
-		  .gpio_rx_en = 0, .gpio_out_level = 0, .gpio_tx_id = id } \
-	}, \
-} \
-
-#define FUNCTION_DESC_GPIO_OUTPUT_HIGH(id) \
-{ \
-	.name = "DES_TXID"#id"_OUTPUT_HIGH", \
-	.group_names = serdes_gpio_groups, \
-	.num_group_names = ARRAY_SIZE(serdes_gpio_groups), \
-	.data = (void *)(const struct serdes_function_data []) { \
-		{ .gpio_out_dis = 0, .gpio_tx_en = 0, \
-		  .gpio_rx_en = 0, .gpio_out_level = 1, .gpio_tx_id = id } \
-	}, \
-} \
-
-#define FUNCTION_DES_DELAY_MS(ms) \
-{ \
-	.name = "DELAY_"#ms"MS", \
-	.group_names = serdes_gpio_groups, \
-	.num_group_names = ARRAY_SIZE(serdes_gpio_groups), \
-	.data = (void *)(const struct serdes_function_data []) { \
-		{ .mdelay = ms, } \
-	}, \
-} \
-
 static struct pinctrl_pin_desc max96752_pins_desc[] = {
 	PINCTRL_PIN(MAXIM_MAX96752_GPIO0, "MAX96752_GPIO0"),
 	PINCTRL_PIN(MAXIM_MAX96752_GPIO1, "MAX96752_GPIO1"),
@@ -338,14 +231,14 @@ static struct serdes_chip_bridge_ops max96752_bridge_ops = {
 	.disable = max96752_bridge_post_disable,
 };
 
-
 static int max96752_pinctrl_set_mux(struct serdes *serdes,
 				    unsigned int function, unsigned int group)
 {
 	struct serdes_pinctrl *pinctrl = serdes->pinctrl;
 	struct function_desc *func;
 	struct group_desc *grp;
-	int i;
+	unsigned int i, offset, npins;
+	const char *func_name, *grp_name;
 	u16 ms;
 
 	func = pinmux_generic_get_function(pinctrl->pctl, function);
@@ -356,17 +249,33 @@ static int max96752_pinctrl_set_mux(struct serdes *serdes,
 	if (!grp)
 		return -EINVAL;
 
+#if KERNEL_VERSION(6, 12, 0) > LINUX_VERSION_CODE
+	npins = grp->num_pins;
+	func_name = func->name;
+	grp_name = grp->name;
+#else
+	npins = grp->grp.npins;
+	func_name = func->func.name;
+	grp_name = grp->grp.name;
+#endif
+
 	SERDES_DBG_CHIP("%s: serdes chip %s func=%s data=%p group=%s data=%p, num_pin=%d\n",
-			__func__, serdes->chip_data->name, func->name,
-			func->data, grp->name, grp->data, grp->num_pins);
+			__func__, serdes->chip_data->name, func_name,
+			func->data, grp_name, grp->data, npins);
 
 	if (func->data) {
 		struct serdes_function_data *fdata = func->data;
 
 		ms = fdata->mdelay;
-		for (i = 0; i < grp->num_pins; i++) {
+		for (i = 0; i < npins; i++) {
+#if KERNEL_VERSION(6, 12, 0) > LINUX_VERSION_CODE
+			offset = grp->pins[i] - pinctrl->pin_base;
+#else
+			offset = grp->grp.pins[i] - pinctrl->pin_base;
+#endif
+
 			if (!ms) {
-				serdes_set_bits(serdes, GPIO_A_REG(grp->pins[i] - pinctrl->pin_base),
+				serdes_set_bits(serdes, GPIO_A_REG(offset),
 						GPIO_OUT_DIS | GPIO_RX_EN | GPIO_TX_EN | GPIO_OUT,
 						FIELD_PREP(GPIO_OUT_DIS, fdata->gpio_out_dis) |
 						FIELD_PREP(GPIO_RX_EN, fdata->gpio_rx_en) |
@@ -374,13 +283,11 @@ static int max96752_pinctrl_set_mux(struct serdes *serdes,
 						FIELD_PREP(GPIO_OUT, fdata->gpio_out_level));
 				if (fdata->gpio_tx_en)
 					serdes_set_bits(serdes,
-							GPIO_B_REG(grp->pins[i] - pinctrl->pin_base),
-							GPIO_TX_ID,
+							GPIO_B_REG(offset), GPIO_TX_ID,
 							FIELD_PREP(GPIO_TX_ID, fdata->gpio_tx_id));
 				if (fdata->gpio_rx_en)
 					serdes_set_bits(serdes,
-							GPIO_C_REG(grp->pins[i] - pinctrl->pin_base),
-							GPIO_RX_ID,
+							GPIO_C_REG(offset), GPIO_RX_ID,
 							FIELD_PREP(GPIO_RX_ID, fdata->gpio_rx_id));
 			} else {
 				mdelay(ms);
@@ -652,7 +559,7 @@ static struct serdes_chip_split_ops max96752_split_ops = {
 	.set_i2c_addr = max96752_set_i2c_addr,
 };
 
-static const struct check_reg_data max96752_improtant_reg[10] = {
+static const struct check_reg_data max96752_important_reg[10] = {
 	{
 		"MAX96752 VIDEO LOCK",
 		{ 0x0003, (1 << 0) },
@@ -667,22 +574,27 @@ static int max96752_check_reg(struct serdes *serdes)
 	int i =  0, ret = 0;
 	unsigned int val = 0;
 
-	for (i = 0; i < ARRAY_SIZE(max96752_improtant_reg); i++) {
-		if (!max96752_improtant_reg[i].seq.reg)
+	for (i = 0; i < ARRAY_SIZE(max96752_important_reg); i++) {
+		if (!max96752_important_reg[i].seq.reg)
 			break;
 
-		ret = serdes_reg_read(serdes, max96752_improtant_reg[i].seq.reg, &val);
-		if (!ret && !(val & max96752_improtant_reg[i].seq.def)
-		    && (!atomic_read(&serdes->flag_early_suspend)))
+		ret = serdes_reg_read(serdes, max96752_important_reg[i].seq.reg, &val);
+		if (ret)
+			return ret;
+
+		if (!(val & max96752_important_reg[i].seq.def)
+		    && (!atomic_read(&serdes->flag_early_suspend))) {
 			dev_info(serdes->dev, "warning %s %s reg[0x%x] = 0x%x\n", __func__,
-				 max96752_improtant_reg[i].name,
-				 max96752_improtant_reg[i].seq.reg, val);
+				 max96752_important_reg[i].name,
+				 max96752_important_reg[i].seq.reg, val);
+			return -EINVAL;
+		}
 	}
 
 	return 0;
 }
 
-static struct serdes_check_reg_ops max96752_check_reg_ops = {
+static struct serdes_check_state_ops max96752_check_ops = {
 	.check_reg = max96752_check_reg,
 };
 
@@ -727,7 +639,7 @@ struct serdes_chip_data serdes_max96752_data = {
 	.bridge_ops	= &max96752_bridge_ops,
 	.pinctrl_ops	= &max96752_pinctrl_ops,
 	.split_ops	= &max96752_split_ops,
-	.check_ops	= &max96752_check_reg_ops,
+	.check_ops	= &max96752_check_ops,
 	.gpio_ops	= &max96752_gpio_ops,
 	.pm_ops		= &max96752_pm_ops,
 	.irq_ops	= &max96752_irq_ops,
