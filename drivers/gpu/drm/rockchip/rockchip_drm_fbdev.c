@@ -27,10 +27,10 @@ static int rockchip_fbdev_mmap(struct fb_info *info,
 
 static const struct fb_ops rockchip_drm_fbdev_ops = {
 	.owner		= THIS_MODULE,
+	__FB_DEFAULT_DMAMEM_OPS_RDWR,
 	DRM_FB_HELPER_DEFAULT_OPS,
 	.fb_mmap	= rockchip_fbdev_mmap,
 	__FB_DEFAULT_DMAMEM_OPS_DRAW,
-
 };
 
 static int rockchip_drm_fbdev_create(struct drm_fb_helper *helper,
