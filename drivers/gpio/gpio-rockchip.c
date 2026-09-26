@@ -784,7 +784,7 @@ fail:
 	return ret;
 }
 
-static void rockchip_gpio_get_ver(struct rockchip_pin_bank *bank)
+static int rockchip_gpio_get_ver(struct rockchip_pin_bank *bank)
 {
 	bank->version_id = readl(bank->reg_base + gpio_regs_v2.version_id);
 
@@ -808,11 +808,17 @@ static void rockchip_gpio_get_ver(struct rockchip_pin_bank *bank)
 		bank->gpio_regs = &gpio_regs_v2;
 		bank->gpio_type = GPIO_TYPE_V2_7;
 		break;
-	default:
+	case GPIO_TYPE_V1:
 		bank->gpio_regs = &gpio_regs_v1;
 		bank->gpio_type = GPIO_TYPE_V1;
-		pr_info("Note: Use default GPIO_TYPE_V1!\n");
+		break;
+	default:
+		dev_err(bank->dev, "unsupported version ID: 0x%08x\n",
+			bank->version_id);
+		return -ENODEV;
 	}
+
+	return 0;
 }
 
 static struct rockchip_pin_bank *
@@ -1168,7 +1174,9 @@ static int rockchip_gpio_probe(struct platform_device *pdev)
 		}
 	}
 
-	rockchip_gpio_get_ver(bank);
+	ret = rockchip_gpio_get_ver(bank);
+	if (ret)
+		return ret;
 
 	ret = clk_prepare(bank->db_clk);
 	if (ret) {
