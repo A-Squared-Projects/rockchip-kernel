@@ -409,33 +409,59 @@ command does not discriminate either (passing and failing boots both
 occur with zero and with several concurrent lines, and 6.1 passes with
 more concurrent activity than some failing port boots).
 
+An `initcall_debug` timeline (needs a build on this board: the command
+line is the DTB's `/chosen/bootargs`, rewritten at image time, and the
+FIT is signed, so there is no on-device env to edit) rules out every
+switched load as a concurrent actor: the USB host VBUS regulator and
+its 100 ms startup delay finish by 0.44 s, backlight and panel by
+0.79 s, the USB controllers by 0.90 s, the audio card starts at 1.33 s,
+and the LED driver never probes. The GT911 blocks i2c-1 for 200 ms
+right before the mmc probe on both outcomes. On a passing and a failing
+boot of the same image the pwrseq, 400 kHz, clock-switch and outcome
+timestamps agree to within 1 ms, with the same preceding probe
+durations.
+
+The one thing that is concurrent with the transaction on both boots is
+the SPI NAND: `rksfc_driver_init` starts at 1.055 s, the SFTL's initial
+NAND reads run through the whole SDIO attempt, and the probe ends at
+1.244 s. That does not separate pass from fail on the port, but it
+lines up with everything else: A and C pass on the attempt that lands
+after 1.24 s, and the failing attempts all sit inside the NAND burst.
+The SFC pins are on GPIO3 A, so the NAND is on the 3.3 V vccio3 rail
+(vcc_io), and the WiFi I/O rail vcc_1v8 is regulated from vcc_io. The
+drivers link in the same order in both trees and `clk_sfc` has no rate
+propagation to the PLLs, so the overlap is not a clock effect and is
+not new by construction; whether 6.1 has the same overlap is unknown,
+because no 6.1 timeline has been taken.
+
 Where that leaves it. Everything readable from software is identical
 or non-discriminating: registers, clocks, pins, configs, bus rate,
 timing mode, sample phase, settling time, carried card state, probe
 order, host index, Bluetooth, USB overlap, dmesg concurrency, and the
-SDIO device tree. Three things remain, in cost order:
+SDIO device tree. What remains:
 
-1. A probe timeline that does not depend on drivers printing:
-   `initcall_debug` on the kernel command line (no build) lists every
-   probe with a timestamp and duration. What is probing in the window
-   0.85 to 1.0 s on a failing port boot, a passing port boot and a 6.1
-   boot, especially silent power users (the USB host VBUS regulator
-   and hub, the panel enable and backlight PWM, the speaker and
-   headphone amplifier controls, the LED driver), is the list of
-   candidates for a supply-side coupling into the WiFi module.
-2. Elimination by variant, one node at a time on the unpatched port,
-   six boots each: USB host controllers disabled; panel and backlight
-   disabled; audio card disabled. A variant that goes to 6 of 6 names
-   the coupling; if none does, the coupling is not on the board's
-   switched loads.
-3. The bench: a scope on SDIO CLK and CMD across the switch out of the
-   init rate on a failing port boot and a passing 6.1 boot, and on the
-   same trigger the WiFi module's supply rails (VBAT and the 1.8 V
-   I/O rail); and one real power cycle on each image, since every one
-   of the forty-odd loop boots is a warm reboot.
+1. The same `initcall_debug` timeline on 6.1. If the SDIO attach does
+   not overlap the rksfc probe there, the overlap is the 6.1-versus-port
+   difference and the NAND burst is the prime suspect.
+2. A one-line kernel experiment that separates "inside the NAND burst"
+   from "early in the boot": move `rksfc_driver_init` from
+   `module_init` to `late_initcall` so the SDIO transaction keeps its
+   1.06 s slot and the NAND reads move after it. Six boots. 6 of 6 at
+   the unchanged time names the NAND burst; 1 of 6 says the burst is
+   innocent and the coupling is elsewhere. Diagnostic only; it does not
+   ship.
+3. Elimination variants on the unpatched port for the steady loads
+   (panel and backlight, audio), six boots each. The USB host cannot be
+   disabled remotely: ethernet is the RTL8152 behind it and it carries
+   the only way in on a failing boot.
+4. The bench: a scope on SDIO CLK and CMD across the switch on a
+   failing port boot and a passing 6.1 boot, and on the same trigger
+   vcc_io and vcc_1v8 at the WiFi module; and real power cycles on each
+   image. One cold boot of E passed first time, which at E's 1-in-6
+   warm rate is what chance gives once and is not evidence yet.
 
-None of A to E ship. They live on meta-rithum's local scratch branches
-marked diagnostic.
+None of A to E, nor the `initcall_debug` or late_initcall builds, ship.
+They live on meta-rithum's local scratch branches marked diagnostic.
 
 ### 4.3 Audio codec: mainline refuses version B
 
