@@ -192,8 +192,8 @@ Signature, identical on every failing boot:
         50 MHz and timing out
     mmc1: Failed to initialize a non-removable card
 
-Init at 400 kHz succeeds every time (CMD5/CMD3 answer), then every CMD52
-at 50 MHz times out. On 6.1 the same unit type enumerates on the first
+Init at 400 kHz succeeds every time (CMD5, CMD3, CCCR and common CIS),
+then the first CMD52 at 50 MHz times out. On 6.1 the same unit type enumerates on the first
 attempt at 50 MHz, every time observed. The voltage warning is benign
 and appears on 6.1 too. A failing boot is not silent: selftest halts at
 S55 with "Hardware fault: wifi mac-wlan", so the unit looks dead from
@@ -227,31 +227,120 @@ the pass, 1.032 s on the fail, and the first 400 kHz to 50 MHz attempt
 succeeds in one and times out in the other. Every retry then repeats the
 same shape: the identification commands at the low clock succeed (the
 core would not print the 50 MHz bus speed otherwise), and the first
-traffic at 50 MHz, the CIS read, times out. So it is not "the card is
+traffic at 50 MHz times out. So it is not "the card is
 not there"; it is "the card answers at 400 kHz and never at 50 MHz", and
 which of the two a boot gets is decided before the first attempt.
 
-Rate so far on the gpio-ranges builds: 5 of 14 boots up (4/8 then 1/6).
-6.1 on a different unit (0750) has never been seen to fail the first
-attempt. The same loop has not yet been run on 0002 with the 6.1 image,
-and 0002 is a unit with a known hardware fault (its microphone), so a
-marginal WiFi module on this one unit is not excluded.
+Control, run on unit 0002 with both images and the same loop (ssh in,
+reboot, six times): 6.1 passes 6 of 6, the unpatched port passes 1 of
+6. Earlier rate on the port: 5 of 14. Unit 0002 has a known microphone
+fault, but the control shows its WiFi module is fine under 6.1, so this
+is the port.
 
-Next, in order of how much each result decides:
+Where it dies, precisely. An earlier version of this section said
+"the CIS read"; that was wrong. `mmc_sdio_init_card` reads the CCCR and the common CIS
+at the init clock, then switches the card to high speed, then raises
+the host clock, then sends the CMD52 pair of `sdio_enable_4bit_bus`,
+then reads each function's CIS. So on a failing attempt CMD5, CMD3, the
+CCCR and the common CIS all succeed at the init clock, and the first
+command sent at 50 MHz gets no response. The `-110` lands about 1 ms
+after the "50000000Hz" line on every failing attempt. That is the
+controller's hardware response timeout (64 card clocks) surfacing
+through the interrupt path; the software command timer would take at
+least 10 ms. So the controller clock is running and the card simply
+does not answer at 50 MHz. Each retry in the ladder re-asserts the
+`sdio_pwrseq` reset before it identifies, so the card is reset four
+times per failing boot and still never answers at speed.
 
-1. Control: flash 0002 with the 6.1 image and run the identical loop
-   (ssh in, reboot, six times). If 6.1 fails on 0002 too, this is the
-   unit, not the port.
-2. If 6.1 passes on 0002, two one-line device-tree experiments, each as
-   its own build of six boots: `post-power-on-delay-ms = <100>;` on
-   `sdio_pwrseq` (the reset pulse the kernel gives WL_REG_ON is only the
-   core's 10 ms power delay, and there is no post-reset settle time in
-   the node), and `max-frequency = <25000000>;` on `&sdio` (if it still
-   fails at 25 MHz, it is not signal integrity at 50 MHz).
-3. Data to capture on both kinds of boot regardless: the full unfiltered
-   dmesg from 0.8 s to 1.3 s, and the raw SDIO phase registers via
-   devmem at CRU 0xff500488 and 0xff50048c (SDIO_CON0/CON1), since
-   `clk_summary` shows rates, not phases.
+Experiment A (`post-power-on-delay-ms = <100>` on `sdio_pwrseq`): WiFi
+up on 6 of 6, but 5 of those 6 still failed the first two attempts and
+came up on the third, at the 200 kHz init clock. A does not stop the
+failure; it stretches the retry ladder until an attempt lands late
+enough. Read together with the baseline (four attempts inside ~210 ms
+of the first power-on, all failing) and A (third attempt roughly 400 ms
+after the first power-on, passing), the card needs wall-clock time
+after the first power-on that the reset pulses do not reset, or
+something else in the same window has to finish first. A is a
+workaround, not a fix, and must not be shipped as the answer.
+
+Kernel-side diff of every piece of the SDIO path, rithum-6.1 against
+this branch, all found functionally identical:
+
+- `drivers/mmc/core/`: the sdio, sdio_ops, sdio_cis, core, host, bus,
+  pwrseq and regulator deltas are renames, const-ification,
+  `devm_mmc_alloc_host`, and the "Failed to initialize a non-removable
+  card" message. No change to the init sequence.
+- `drivers/mmc/host/dw_mmc.c`: tasklet became a BH workqueue (same
+  softirq context), plus a `hw_reset` hook nothing on RK3308 uses.
+- `drivers/mmc/host/dw_mmc-rockchip.c`: the vendor `USRID_INTER_PHASE`
+  test became an `internal_phase` flag from the match data. RK3308
+  binds as `rockchip,rk3288-dw-mshc`, so `internal_phase` is false and
+  both trees drive the phases through `clk_set_phase` on
+  `SCLK_SDIO_SAMPLE` and `SCLK_SDIO_DRV`. Sample phase is
+  `rockchip,default-sample-phase`, absent for rk3308, so 0; drive
+  phase is 90 in SD high speed. SDIO_CON0 = 0x2, CON1 = 0x0 on every
+  boot captured so far is exactly those values.
+- `drivers/clk/rockchip/clk-rk3308.c`, `clk-mmc-phase.c`, `clk.c`,
+  `clk-pll.c`, and the clk core's mux and composite parent selection:
+  the SDIO branches and their flags are byte-identical; the core's
+  `CLK_SET_RATE_NO_REPARENT` handling was refactored without changing
+  behaviour. `clk_sdio_div` can still reparent among DPLL, VPLL0, VPLL1
+  and xin24m at every rate change.
+- `net/rfkill/rfkill-wlan.c`: gpio to gpiod conversion and property
+  renames. The `clk_wifi` rate and enable, and the GRF 0x0314
+  REF_CLKOUT enable, are the same code. None of the WiFi GPIOs exist on
+  this board, so the driver's effect is the pinctrl hog (`wifi_wake_host`,
+  `rtc_32k`) and that clock enable.
+- `drivers/soc/rockchip/io-domain.c`: only the regulator lookup used
+  for a `dev_info` line changed. vccio4 is `vcc_1v8`, a fixed regulator
+  probed at subsys_initcall, and the io-domain probes at fs_initcall,
+  before dw_mmc at device_initcall, on both trees.
+- `drivers/pinctrl/pinctrl-rockchip.c`: the 644-line delta is RV1103B
+  and RK3572 support plus an input-enable hook no RK3308 path calls.
+- `drivers/gpio/gpio-rockchip.c`: the vendor pin-base change and the
+  four stable fixes ported here (4.1).
+- Device tree: the SDIO, pwrseq, wlan-platdata, io-domains and cru
+  nodes are identical to 6.1; the compiled DTB was already compared.
+
+What that leaves is not a code path on the SDIO side. It is either
+something else in the same window that touches the combo chip or a
+resource it shares, or the same hardware margin exposed by a shift in
+timing. Two things on this board qualify and have not been checked:
+
+1. Bluetooth. The RTL8723DS is a WiFi and BT combo. BT is on UART4
+   through the serdev H5 driver (`realtek,rtl8723ds-bt`, BT_REG_ON on
+   gpio4 PB3, device-wake PB2, host-wake PB4). The H5 driver claims
+   BT_REG_ON as an output driven low at probe, and drives it low then
+   high at HCI open. `CONFIG_BT_HCIUART=m`, so when that happens is set
+   by whoever loads `hci_uart`, not by the kernel. If that load lands
+   inside the SDIO bring-up on the port and after it on 6.1, it would
+   explain the start-time correlation, the ladder failing wholesale
+   and A rescuing the third attempt. Test without a build: on the
+   unpatched port, keep `hci_uart` from loading and run six boots;
+   and on both images, read the `Bluetooth:` and `hci_h5` timestamps
+   against the `mmc1:` lines.
+2. Physical state under 6.1. Every register and clock comparison so far
+   was pass-versus-fail on the port. Nothing physical has been compared
+   with 6.1 on the same unit. Needed from a 6.1 boot of 0002:
+   `clk_summary` lines for `sdio`, `dpll`, `vpll0`, `vpll1`; SDIO_CON0
+   and CON1 (CRU 0xff500488 and 0xff50048c); GRF SOC_CON0 (0xff000300,
+   bit 4 is vccio4) and GRF 0x0314; pinconf and pinmux of pins 128 to
+   133; and `/sys/kernel/debug/mmc1/ios`. Any difference from a passing
+   6.12 boot is a candidate; no difference retires the whole physical
+   class.
+
+Also worth having on every future capture: the full "Bus speed" line
+(it carries "slot req ... actual ... div"), whether the loop's boots are
+warm reboots or power cycles, and SDIO_CON0/CON1 from a boot where SDIO
+never attached (none captured yet; all CON samples so far are from
+boots that eventually came up).
+
+Experiment B (`max-frequency = <25000000>`) is running. If it fails at
+25 MHz too, this is not signal integrity at 50 MHz and the Bluetooth
+and wall-clock lines above are the remaining ones. Variant C
+(`post-power-on-delay-ms = <300>`) would tell whether more wall-clock
+alone gives 6 of 6 with zero retries, but it is a workaround either
+way; run it after the Bluetooth check, which needs no build.
 
 ### 4.3 Audio codec: mainline refuses version B
 
@@ -493,8 +582,11 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   use-after-free behind it is not fixed. Watch pstore for `refcount_t:
   underflow` across the reboot loop; design the cookie capture the 6.1
   comment asks for.
-- WiFi SDIO is intermittent on 6.12 (4.2). Establish the pass rate (4 of 8 boots so far), run the clock comparison on a failing
-  boot, then fix. This blocks calling the port done.
+- WiFi SDIO is intermittent on 6.12 (4.2): 6.1 passes 6 of 6 on the
+  same unit, the port 1 of 6. The whole SDIO code path is diffed and
+  equivalent; the Bluetooth timing check and the 6.1 register snapshot
+  are the next two results. Experiment A is a workaround, not a fix.
+  This blocks calling the port done.
 - The RS variant shares every fix here and has not been booted.
 - Branch naming: this is `claude/kernel-6-12-port-kg1g39`; it wants a
   `rithum-6.12` home.
