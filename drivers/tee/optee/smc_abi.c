@@ -13,6 +13,7 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/irqdomain.h>
+#include <linux/kexec.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/module.h>
@@ -1484,6 +1485,20 @@ static int optee_smc_remove(struct platform_device *pdev)
 static void optee_shutdown(struct platform_device *pdev)
 {
 	struct optee *optee = platform_get_drvdata(pdev);
+
+	/*
+	 * Secure world's cached shared memory only matters to a kernel that
+	 * will run after this one without a reset, which is kexec: it would
+	 * inherit secure world's references into pages it now owns. A reboot
+	 * or power-off resets secure world along with everything else, so
+	 * there is nothing to hand back. Asking anyway races with any TEE
+	 * client that is still exiting while devices shut down, since the
+	 * shm handed back here can be one a call in flight is about to use;
+	 * on this product that has corrupted memory (6.1) and hung the
+	 * reboot (6.12). So leave the cache alone unless kexec needs it.
+	 */
+	if (!kexec_in_progress)
+		return;
 
 	if (!optee->rpc_param_count)
 		optee_disable_shm_cache(optee);
