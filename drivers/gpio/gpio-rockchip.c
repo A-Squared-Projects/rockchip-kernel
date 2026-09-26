@@ -1149,18 +1149,15 @@ static int rockchip_gpio_probe(struct platform_device *pdev)
 	if (IS_ERR(bank->reg_base))
 		return PTR_ERR(bank->reg_base);
 
-	rockchip_gpio_get_ver(bank);
-
 	raw_spin_lock_init(&bank->slock);
 
 	if (!ACPI_COMPANION(dev)) {
-		bank->clk = devm_clk_get(dev, "bus");
+		bank->clk = devm_clk_get_enabled(dev, "bus");
 		if (IS_ERR(bank->clk)) {
-			bank->clk = of_clk_get(dev->of_node, 0);
-			if (IS_ERR(bank->clk)) {
-				dev_err(dev, "fail to get apb clock\n");
-				return PTR_ERR(bank->clk);
-			}
+			bank->clk = devm_clk_get_enabled(dev, NULL);
+			if (IS_ERR(bank->clk))
+				return dev_err_probe(dev, PTR_ERR(bank->clk),
+						     "fail to get apb clock\n");
 		}
 
 		bank->db_clk = devm_clk_get(dev, "db");
@@ -1171,11 +1168,8 @@ static int rockchip_gpio_probe(struct platform_device *pdev)
 		}
 	}
 
-	ret = clk_prepare_enable(bank->clk);
-	if (ret) {
-		dev_err(bank->dev, "Failed to enable GPIO clock: %d\n", ret);
-		return ret;
-	}
+	rockchip_gpio_get_ver(bank);
+
 	ret = clk_prepare(bank->db_clk);
 	if (ret) {
 		dev_warn(bank->dev, "Failed to prepare db_clk: %d\n", ret);
@@ -1258,7 +1252,6 @@ err_unlock:
 
 	mutex_unlock(&bank->deferred_lock);
 err_clk:
-	clk_disable_unprepare(bank->clk);
 	clk_unprepare(bank->db_clk);
 
 	return ret;
@@ -1279,7 +1272,6 @@ static void rockchip_gpio_remove(struct platform_device *pdev)
 	mutex_unlock(&irq_affinity_mutex);
 	rockchip_gpio_remove_cpuhp();
 
-	clk_disable_unprepare(bank->clk);
 	if (bitmap_empty(bank->db_clk_bitmap, RK_GPIO_BANK_MAX_PIN))
 		clk_unprepare(bank->db_clk);
 	else
