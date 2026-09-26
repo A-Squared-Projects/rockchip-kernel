@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
+/*
+ * The decompressor has no WARN_ONCE() and no place to put .data..once, so
+ * the fortified string helpers must not be used here; see string.c.
+ */
+#define __NO_FORTIFY
 #include <linux/libfdt_env.h>
 #include <asm/setup.h>
 #include <libfdt.h>
