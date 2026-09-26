@@ -302,45 +302,49 @@ this branch, all found functionally identical:
 - Device tree: the SDIO, pwrseq, wlan-platdata, io-domains and cru
   nodes are identical to 6.1; the compiled DTB was already compared.
 
-What that leaves is not a code path on the SDIO side. It is either
-something else in the same window that touches the combo chip or a
-resource it shares, or the same hardware margin exposed by a shift in
-timing. Two things on this board qualify and have not been checked:
+Experiment B (`max-frequency = <25000000>`, no A): 1 of 6, the same as
+the unpatched port, and the failing ladder has the identical shape at
+25 MHz: the first command after the clock leaves the init rate gets no
+response about 1 ms later, on every attempt. So it is not 50 MHz and
+not a rate margin in the simple sense. The card stops answering when
+the clock leaves the init rate, whatever rate it lands on.
 
-1. Bluetooth. The RTL8723DS is a WiFi and BT combo. BT is on UART4
-   through the serdev H5 driver (`realtek,rtl8723ds-bt`, BT_REG_ON on
-   gpio4 PB3, device-wake PB2, host-wake PB4). The H5 driver claims
-   BT_REG_ON as an output driven low at probe, and drives it low then
-   high at HCI open. `CONFIG_BT_HCIUART=m`, so when that happens is set
-   by whoever loads `hci_uart`, not by the kernel. If that load lands
-   inside the SDIO bring-up on the port and after it on 6.1, it would
-   explain the start-time correlation, the ladder failing wholesale
-   and A rescuing the third attempt. Test without a build: on the
-   unpatched port, keep `hci_uart` from loading and run six boots;
-   and on both images, read the `Bluetooth:` and `hci_h5` timestamps
-   against the `mmc1:` lines.
-2. Physical state under 6.1. Every register and clock comparison so far
-   was pass-versus-fail on the port. Nothing physical has been compared
-   with 6.1 on the same unit. Needed from a 6.1 boot of 0002:
-   `clk_summary` lines for `sdio`, `dpll`, `vpll0`, `vpll1`; SDIO_CON0
-   and CON1 (CRU 0xff500488 and 0xff50048c); GRF SOC_CON0 (0xff000300,
-   bit 4 is vccio4) and GRF 0x0314; pinconf and pinmux of pins 128 to
-   133; and `/sys/kernel/debug/mmc1/ios`. Any difference from a passing
-   6.12 boot is a candidate; no difference retires the whole physical
-   class.
+Retired by measurement across 18 boots (meta-rithum): the mmc1
+start-time correlation (a pass at 0.917 s and a fail at 0.939 s on the
+same image); USB enumeration overlap (both outcomes with and without
+it); Bluetooth (`hci_uart` loads at 8.4 s, seven seconds after mmc1 is
+decided, on every boot); the rfkill-wlan probe (1.17 s on every boot
+regardless of outcome). Retired by code: the chip's state across a warm
+reboot (the mmc host class shutdown hook is the same in both trees, and
+a failed boot leaves the card in pwrseq reset through the reboot on
+either kernel; B boot 5 passed after four failed boots and boot 6
+failed after it, so the previous boot does not decide the next). On two
+B boots 22 ms apart with intervals matching to 1 ms, one passed and
+one failed: this looks like a genuine marginal condition, not an
+ordering race with another driver.
 
-Also worth having on every future capture: the full "Bus speed" line
-(it carries "slot req ... actual ... div"), whether the loop's boots are
-warm reboots or power cycles, and SDIO_CON0/CON1 from a boot where SDIO
-never attached (none captured yet; all CON samples so far are from
-boots that eventually came up).
+Physical state measured on the port (B image, unit 0002): SDIO_CON0
+0x2, CON1 0x0, GRF SOC_CON0 0x194 (bit 4 set, vccio4 at 1.8 V), GRF
+0x314 0x7. All boots in every loop so far are warm reboots; nobody has
+seen a cold boot on either kernel, which needs the bench.
 
-Experiment B (`max-frequency = <25000000>`) is running. If it fails at
-25 MHz too, this is not signal integrity at 50 MHz and the Bluetooth
-and wall-clock lines above are the remaining ones. Variant C
-(`post-power-on-delay-ms = <300>`) would tell whether more wall-clock
-alone gives 6 of 6 with zero retries, but it is a workaround either
-way; run it after the Bluetooth check, which needs no build.
+What has never been done is a physical comparison with 6.1 on the same
+unit. Every register comparison so far is port-versus-port. The next
+result is a raw dump from a 6.1 boot and from a passing boot of the
+unpatched port: CRU 0xff500000 to 0xff500500 (PLL CONs at 0x00 to
+0x7f, CLKSEL_CON at 0x100, CLKGATE_CON at 0x300, SDIO_CON0/1 at
+0x488/0x48c), GRF 0xff000000 to 0xff000800 (iomux, pull, drive,
+SOC_CON0 at 0x300), the dw_mmc block 0xff4a0000 to 0xff4a0100 (CLKDIV
+0x08, CLKENA 0x10, TMOUT 0x14, FIFOTH 0x4c, UHS_REG 0x74), plus
+`clk_summary` and the pinctrl debugfs dumps. Any SDIO-relevant word
+that differs is the candidate; if nothing differs, the fault is in
+timing the card sees and not in anything the SoC is configured to do,
+and the bench (cold boots, a scope on CLK and CMD at the switch) is the
+next instrument.
+
+Experiment A (100 ms post-power-on delay) and its 300 ms variant are
+workarounds either way; the variant only bounds how much wall-clock
+the card needs before the switch works, which is still worth knowing.
 
 ### 4.3 Audio codec: mainline refuses version B
 
