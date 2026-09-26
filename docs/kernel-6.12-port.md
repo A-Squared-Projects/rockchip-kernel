@@ -207,39 +207,51 @@ whose delta is other SoCs; the pin-range fix, since the pin layout was
 identical before and after `gpio-ranges` and the fault persists with the
 ranges in place.
 
-Leading hypothesis, from the clock tree in `clk-rk3308.c`: `clk_sdio` has
-no divider of its own and carries `CLK_SET_RATE_PARENT`, so the host's
-`clk_set_rate(ciu, 100 MHz)` propagates into `clk_sdio_div`, a composite
-whose mux selects among DPLL, VPLL0, VPLL1 and XIN24M with no
-`CLK_SET_RATE_NO_REPARENT`. The vendor I2S TDM driver sets the rates of
-`mclk_root0` and `mclk_root1`, which are the two VPLLs, when audio is
-configured. If the SDIO divider is parented to a VPLL at init and audio
-later moves that PLL, the card clock changes under a divider computed
-for 100 MHz while the host still believes it is at 50 MHz; whether that
-happens depends on the order of audio and MMC initialisation, which is
-exactly the kind of thing that varies boot to boot and between 6.1 and
-6.12 (different probe ordering, modules versus built-in, deferred
-probes). Not yet confirmed on hardware.
+Ruled out, by measurement on one passing and one failing boot of the
+same build (555c18743d6):
 
-The test that decides it, on a failing boot and a passing boot:
+- Clocks: `clk_summary` identical byte for byte. `clk_sdio_div` on DPLL
+  at 100 MHz, `clk_sdio` 100 MHz, sample and drive clocks 50 MHz,
+  VPLL0/VPLL1/DPLL rates the same. This kills the hypothesis that audio
+  moves a PLL under the SDIO divider; it is a post-boot snapshot, so a
+  PLL that moved and moved back would look the same, but nothing is
+  left wrong afterwards.
+- Pinconf of GPIO4 A0 to A5: identical.
+- Audio: the acodec probe completes after SDIO's first attempt has
+  already resolved on both boots (125 ms after success on the pass, in
+  the middle of the retry ladder on the fail). The I2S nodes log nothing.
+  A bystander, not a cause.
 
-    grep -E "sdio|vpll|dpll" /sys/kernel/debug/clk/clk_summary
+What the two boots do differ in is when SDIO bring-up starts: 0.914 s on
+the pass, 1.032 s on the fail, and the first 400 kHz to 50 MHz attempt
+succeeds in one and times out in the other. Every retry then repeats the
+same shape: the identification commands at the low clock succeed (the
+core would not print the 50 MHz bus speed otherwise), and the first
+traffic at 50 MHz, the CIS read, times out. So it is not "the card is
+not there"; it is "the card answers at 400 kHz and never at 50 MHz", and
+which of the two a boot gets is decided before the first attempt.
 
-If `clk_sdio_div`'s parent or rate differs between the two, or `clk_sdio`
-reads anything other than 100000000 on the failing boot, that is the
-cause, and the fix is to pin the parent in the sdio node
-(`assigned-clocks = <&cru SCLK_SDIO_DIV>; assigned-clock-parents = <&cru
-PLL_DPLL>;` or a fixed-rate source) or to mark `clk_sdio_div`
-`CLK_SET_RATE_NO_REPARENT`. If the clocks match on both boots, the next
-suspects are the pinctrl state of the SDIO pins
-(`/sys/kernel/debug/pinctrl/pinctrl-rockchip-pinctrl/pinconf-pins`,
-GPIO4 A0 to A5) and the power-sequence timing (`sdio_pwrseq` has no
-`post-power-on-delay-ms`).
+Rate so far on the gpio-ranges builds: 5 of 14 boots up (4/8 then 1/6).
+6.1 on a different unit (0750) has never been seen to fail the first
+attempt. The same loop has not yet been run on 0002 with the 6.1 image,
+and 0002 is a unit with a known hardware fault (its microphone), so a
+marginal WiFi module on this one unit is not excluded.
 
-Earlier hypothesis, now dropped: that the driver-side pin-range fallback
-registered its range after the chip was published, leaving a window for
-the WiFi reset GPIO to be requested without pinctrl. With `gpio-ranges`
-in the device tree that window does not exist, and the fault persists.
+Next, in order of how much each result decides:
+
+1. Control: flash 0002 with the 6.1 image and run the identical loop
+   (ssh in, reboot, six times). If 6.1 fails on 0002 too, this is the
+   unit, not the port.
+2. If 6.1 passes on 0002, two one-line device-tree experiments, each as
+   its own build of six boots: `post-power-on-delay-ms = <100>;` on
+   `sdio_pwrseq` (the reset pulse the kernel gives WL_REG_ON is only the
+   core's 10 ms power delay, and there is no post-reset settle time in
+   the node), and `max-frequency = <25000000>;` on `&sdio` (if it still
+   fails at 25 MHz, it is not signal integrity at 50 MHz).
+3. Data to capture on both kinds of boot regardless: the full unfiltered
+   dmesg from 0.8 s to 1.3 s, and the raw SDIO phase registers via
+   devmem at CRU 0xff500488 and 0xff50048c (SDIO_CON0/CON1), since
+   `clk_summary` shows rates, not phases.
 
 ### 4.3 Audio codec: mainline refuses version B
 
@@ -314,7 +326,12 @@ every Bluetooth firmware download. A Rockchip diagnostic in
 ### 4.7 Reboot can hang forever in the OP-TEE driver
 
 **Status: trigger removed on the branch; the underlying use-after-free
-is still a latent bug that the 6.1 tree already documents.**
+is still a latent bug that the 6.1 tree already documents.** Six
+consecutive reboots of the reproducer loop (ssh in, which signs with
+the TEE host key, then reboot) on 555c18743d6 stranded nothing and left
+no `refcount_t: underflow`, `tee_shm`, `Oops` or `blocked for more than`
+in pstore. Six is not closure for a bug 6.1 saw once in months; dozens
+of the same loop would be.
 
 About one reboot in six on 6.12 never completed:
 
