@@ -129,6 +129,35 @@ void optee_cq_wait_for_completion(struct optee_call_queue *cq,
 	mutex_unlock(&cq->mutex);
 }
 
+/*
+ * Like optee_cq_wait_for_completion() but gives up after @timeout jiffies.
+ * Returns true if a completion arrived, false if the wait timed out. In both
+ * cases the waiter is moved to the end of the queue and its completion
+ * re-armed, so the caller may retry its call or leave via
+ * optee_cq_wait_final().
+ */
+bool optee_cq_wait_for_completion_timeout(struct optee_call_queue *cq,
+					  struct optee_call_waiter *w,
+					  unsigned long timeout)
+{
+	bool completed = wait_for_completion_timeout(&w->c, timeout) > 0;
+
+	mutex_lock(&cq->mutex);
+
+	/* A completion that landed after the timeout still counts */
+	if (!completed && completion_done(&w->c))
+		completed = true;
+
+	/* Move to end of list to get out of the way for other waiters */
+	list_del(&w->list_node);
+	reinit_completion(&w->c);
+	list_add_tail(&w->list_node, &cq->waiters);
+
+	mutex_unlock(&cq->mutex);
+
+	return completed;
+}
+
 static void optee_cq_complete_one(struct optee_call_queue *cq)
 {
 	struct optee_call_waiter *w;

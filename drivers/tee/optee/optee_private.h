@@ -342,6 +342,9 @@ void optee_cq_wait_init(struct optee_call_queue *cq,
 			struct optee_call_waiter *w, bool sys_thread);
 void optee_cq_wait_for_completion(struct optee_call_queue *cq,
 				  struct optee_call_waiter *w);
+bool optee_cq_wait_for_completion_timeout(struct optee_call_queue *cq,
+					  struct optee_call_waiter *w,
+					  unsigned long timeout);
 void optee_cq_wait_final(struct optee_call_queue *cq,
 			 struct optee_call_waiter *w);
 int optee_check_mem_type(unsigned long start, size_t num_pages);
