@@ -260,14 +260,28 @@ every Bluetooth firmware download. A Rockchip diagnostic in
 
 ### 4.7 /dev/fb0 could not be read
 
-Every `read()` of `/dev/fb0` returned EINVAL, with a one-time WARN from
-`fb_read()`, while mmap and drawing worked, so the app never noticed.
-Since 6.5 the fbdev core refuses a read when the `fb_ops` has no
-`fb_read` instead of falling back to `screen_base` itself, and the
-vendor fbdev's ops carried the DMAMEM draw helpers but not the read and
-write pair. Fixed by adding `__FB_DEFAULT_DMAMEM_OPS_RDWR`, as
-`drm_fbdev_dma` does. This matters because several product diagnostics
-read framebuffer content to decide what is on screen.
+Every `read()` of `/dev/fb0` returned EINVAL while mmap and drawing
+worked, so the app never noticed. The first read after boot also leaves
+this in the log, once:
+
+    WARNING: CPU: 3 PID: 1546 at drivers/video/fbdev/core/fb_chrdev.c:37 fb_read+0x47/0x6c
+    fb0: fb_WARN_ON_ONCE(!info->fbops->fb_read)
+    Call trace:
+      warn_slowpath_fmt from fb_read+0x47/0x6c
+      fb_read from vfs_read+0x83/0x122
+
+The reader was a python3 process, one of the product diagnostics that
+inspect framebuffer content to decide what is on screen. Because it is a
+`WARN_ON_ONCE`, every later read fails with EINVAL and no trace, which
+is why the failure looked consistent and the warning looked isolated.
+
+Mechanism: since 6.5 the fbdev core refuses a read when the `fb_ops` has
+no `fb_read`, where 6.1 fell back to copying from `screen_base` itself.
+The vendor fbdev's ops carried the DMAMEM draw helpers but not the read
+and write pair, and had been relying on that fallback. Fixed in
+6bb9fb82405 by adding `__FB_DEFAULT_DMAMEM_OPS_RDWR`, as `drm_fbdev_dma`
+does for a kernel-mapped DMA buffer. If this trace appears, the kernel
+predates that commit.
 
 ### 4.8 Pre-existing noise, verified on a 6.1 boot of the same hardware
 
