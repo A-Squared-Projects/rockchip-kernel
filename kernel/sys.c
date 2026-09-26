@@ -1929,12 +1929,11 @@ SYSCALL_DEFINE1(umask, int, mask)
 
 static int prctl_set_mm_exe_file(struct mm_struct *mm, unsigned int fd)
 {
-	struct fd exe;
+	CLASS(fd, exe)(fd);
 	struct inode *inode;
 	int err;
 
-	exe = fdget(fd);
-	if (!fd_file(exe))
+	if (fd_empty(exe))
 		return -EBADF;
 
 	inode = file_inode(fd_file(exe));
@@ -1944,18 +1943,14 @@ static int prctl_set_mm_exe_file(struct mm_struct *mm, unsigned int fd)
 	 * sure that this one is executable as well, to avoid breaking an
 	 * overall picture.
 	 */
-	err = -EACCES;
 	if (!S_ISREG(inode->i_mode) || path_noexec(&fd_file(exe)->f_path))
-		goto exit;
+		return -EACCES;
 
 	err = file_permission(fd_file(exe), MAY_EXEC);
 	if (err)
-		goto exit;
+		return err;
 
-	err = replace_mm_exe_file(mm, fd_file(exe));
-exit:
-	fdput(exe);
-	return err;
+	return replace_mm_exe_file(mm, fd_file(exe));
 }
 
 /*
@@ -2158,7 +2153,7 @@ static int prctl_set_auxv(struct mm_struct *mm, unsigned long addr,
 	BUILD_BUG_ON(sizeof(user_auxv) != sizeof(mm->saved_auxv));
 
 	task_lock(current);
-	memcpy(mm->saved_auxv, user_auxv, len);
+	memcpy(mm->saved_auxv, user_auxv, sizeof(user_auxv));
 	task_unlock(current);
 
 	return 0;

@@ -1251,8 +1251,10 @@ static void rockchip_pcie_remove(struct platform_device *pdev)
 	if (!PCIE_LINK_UP(status1) || !PCIE_LINK_IS_L0(status2))
 		rockchip->in_remove = 1;
 
+	pci_lock_rescan_remove();
 	pci_stop_root_bus(bridge->bus);
 	pci_remove_root_bus(bridge->bus);
+	pci_unlock_rescan_remove();
 	irq_domain_remove(rockchip->irq_domain);
 
 	/* disable link state */

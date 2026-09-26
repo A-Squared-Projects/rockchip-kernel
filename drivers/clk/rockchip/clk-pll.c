@@ -1385,8 +1385,14 @@ static void rockchip_rk3588_pll_get_params(struct rockchip_clk_pll *pll,
 				& RK3588_PLLCON2_K_MASK);
 }
 
-static unsigned long rockchip_rk3588_pll_recalc_rate(struct clk_hw *hw,
-						     unsigned long prate)
+/*
+ * 2250 MHz <= Fvco <= 4500 MHz
+ * For Fvco > 3 GHz: period jitter +-1% frac PLL, +-0.75% int PLL
+ * For Fvco < 3 GHz: period jitter +-2% frac PLL, +-1.50% int PLL
+ * Fvco = ((m + k / 65536) * Fin) / p
+ * Fout = ((m + k / 65536) * Fin) / (p * 2^s)
+ */
+static unsigned long rockchip_rk3588_pll_recalc_rate(struct clk_hw *hw, unsigned long prate)
 {
 	struct rockchip_clk_pll *pll = to_rockchip_clk_pll(hw);
 	struct rockchip_pll_rate_table cur;
@@ -1416,8 +1422,7 @@ static unsigned long rockchip_rk3588_pll_recalc_rate(struct clk_hw *hw,
 		/* fractional mode */
 		u64 frac_rate64 = prate * cur.k;
 
-		postdiv = cur.p;
-		postdiv *= 65536;
+		postdiv = cur.p * 65536;
 		do_div(frac_rate64, postdiv);
 		rate64 += frac_rate64;
 	}

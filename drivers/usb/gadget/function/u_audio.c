@@ -1427,6 +1427,18 @@ static void ppm_calculate_work(struct work_struct *data)
 
 out:
 	schedule_delayed_work(&g_audio->ppm_work, 1 * HZ);
+static void u_audio_card_free(struct snd_card *card)
+{
+	struct snd_uac_chip *uac = card->private_data;
+
+	if (!uac)
+		return;
+
+	kfree(uac->p_prm.reqs);
+	kfree(uac->c_prm.reqs);
+	kfree(uac->p_prm.rbuf);
+	kfree(uac->c_prm.rbuf);
+	kfree(uac);
 }
 
 int g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
@@ -1519,6 +1531,8 @@ int g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
 		goto fail;
 
 	uac->card = card;
+	card->private_data = uac;
+	card->private_free = u_audio_card_free;
 
 	/*
 	 * Create first PCM device
@@ -1700,6 +1714,8 @@ int g_audio_setup(struct g_audio *g_audio, const char *pcm_name,
 
 snd_fail:
 	snd_card_free(card);
+	return err;
+
 fail:
 	kfree(uac->p_prm.reqs);
 	kfree(uac->c_prm.reqs);
@@ -1732,11 +1748,6 @@ void g_audio_cleanup(struct g_audio *g_audio)
 	if (card)
 		snd_card_free_when_closed(card);
 
-	kfree(uac->p_prm.reqs);
-	kfree(uac->c_prm.reqs);
-	kfree(uac->p_prm.rbuf);
-	kfree(uac->c_prm.rbuf);
-	kfree(uac);
 	kfree(g_audio->fn);
 }
 EXPORT_SYMBOL_GPL(g_audio_cleanup);

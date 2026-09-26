@@ -2717,7 +2717,7 @@ static int __maybe_unused imx415_resume(struct device *dev)
 			return ret;
 		}
 	}
-	return 0;
+	return ret;
 }
 
 static int __maybe_unused imx415_suspend(struct device *dev)
