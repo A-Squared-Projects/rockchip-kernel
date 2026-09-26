@@ -9,7 +9,8 @@ silicon). Branch: `claude/kernel-6-12-port-kg1g39`, verified on hardware at
 merged on top.
 
 The short version: the port is 32-bit ARM, Thumb-2, same rkflash/SFTL
-NAND stack, same boot image layout. No AArch64 switch was ever needed.
+NAND stack, same boot image layout. One fault is still open: WiFi SDIO
+initialisation is intermittent (section 4.2). No AArch64 switch was ever needed.
 What it did need was an inventory of everything Rockchip left unported
 for RK3308 on 6.12, and a complete carry-over of our own history, which
 took two attempts.
@@ -170,23 +171,73 @@ rk3308.dtsi lacks it too; only the RK35xx trees have it, which is exactly
 why those were the SoCs that did not regress. This is worth sending
 upstream.
 
-### 4.2 WiFi SDIO timeouts were the same bug in disguise
+### 4.2 WiFi SDIO timeouts: open, intermittent, and not the pin bug
 
-With the driver-side fix alone, SDIO still failed: init at 400 kHz
-succeeded, then every CMD52 at 50 MHz timed out (`-110`), on every retry
-frequency. No pin error was logged. The `gpio-ranges` commit fixed it
-without any MMC change. The ranges the fallback produced were numerically
-identical to the DT ones, so the difference is *when* they exist: the
-fallback registers the range after `gpiochip_add_data` has already
-published the chip, and a consumer whose deferred probe fires in that
-window (the WiFi power sequence's reset GPIO is the obvious candidate)
-requests its line with no range in place and skips the pinctrl side of
-the request. The DT path registers during chip setup and closes the
-window. Not proven on hardware, but it is the reason `gpio-ranges` is
-load-bearing rather than cosmetic.
+**Status: open.** An earlier version of this section said the
+`gpio-ranges` commit had fixed it. That was called on two passing boots.
+A later boot of a later tip (b93404711cb7, which differs from a passing
+tip only by the fbdev read fix and docs) failed again with the same
+signature, so the fault is intermittent and the two passes were luck.
+Treat "WiFi works on 6.12" as unproven until a pass rate is known.
 
-Lesson recorded by the test side: "no pin-not-registered messages" was
-not sufficient evidence that pin mapping was correct.
+Signature, identical on every failing boot:
+
+    mmc1: Bus speed (slot 0) = 400000Hz
+    dwmmc_rockchip ff4a0000.mmc: card claims to support voltages below defined range
+    mmc1: Bus speed (slot 0) = 50000000Hz
+    mmc1: error -110 whilst initialising SDIO card
+    ... retried at 300 kHz, 200 kHz and 100 kHz, each escalating back to
+        50 MHz and timing out
+    mmc1: Failed to initialize a non-removable card
+
+Init at 400 kHz succeeds every time (CMD5/CMD3 answer), then every CMD52
+at 50 MHz times out. On 6.1 the same unit type enumerates on the first
+attempt at 50 MHz, every time observed. The voltage warning is benign
+and appears on 6.1 too. A failing boot is not silent: selftest halts at
+S55 with "Hardware fault: wifi mac-wlan", so the unit looks dead from
+the front panel while ssh (seeded at S50) still works.
+
+What it is not: the `[WLAN_RFKILL] ... err -2` lines (ENOENT; power is
+sequenced by `sdio_pwrseq`); the SDIO or WiFi device tree, identical to
+6.1 apart from property renames; the dw_mmc-rockchip and dw_mmc code,
+whose 6.1-to-6.12 delta is upstream refactoring; the pinctrl driver,
+whose delta is other SoCs; the pin-range fix, since the pin layout was
+identical before and after `gpio-ranges` and the fault persists with the
+ranges in place.
+
+Leading hypothesis, from the clock tree in `clk-rk3308.c`: `clk_sdio` has
+no divider of its own and carries `CLK_SET_RATE_PARENT`, so the host's
+`clk_set_rate(ciu, 100 MHz)` propagates into `clk_sdio_div`, a composite
+whose mux selects among DPLL, VPLL0, VPLL1 and XIN24M with no
+`CLK_SET_RATE_NO_REPARENT`. The vendor I2S TDM driver sets the rates of
+`mclk_root0` and `mclk_root1`, which are the two VPLLs, when audio is
+configured. If the SDIO divider is parented to a VPLL at init and audio
+later moves that PLL, the card clock changes under a divider computed
+for 100 MHz while the host still believes it is at 50 MHz; whether that
+happens depends on the order of audio and MMC initialisation, which is
+exactly the kind of thing that varies boot to boot and between 6.1 and
+6.12 (different probe ordering, modules versus built-in, deferred
+probes). Not yet confirmed on hardware.
+
+The test that decides it, on a failing boot and a passing boot:
+
+    grep -E "sdio|vpll|dpll" /sys/kernel/debug/clk/clk_summary
+
+If `clk_sdio_div`'s parent or rate differs between the two, or `clk_sdio`
+reads anything other than 100000000 on the failing boot, that is the
+cause, and the fix is to pin the parent in the sdio node
+(`assigned-clocks = <&cru SCLK_SDIO_DIV>; assigned-clock-parents = <&cru
+PLL_DPLL>;` or a fixed-rate source) or to mark `clk_sdio_div`
+`CLK_SET_RATE_NO_REPARENT`. If the clocks match on both boots, the next
+suspects are the pinctrl state of the SDIO pins
+(`/sys/kernel/debug/pinctrl/pinctrl-rockchip-pinctrl/pinconf-pins`,
+GPIO4 A0 to A5) and the power-sequence timing (`sdio_pwrseq` has no
+`post-power-on-delay-ms`).
+
+Earlier hypothesis, now dropped: that the driver-side pin-range fallback
+registered its range after the chip was published, leaving a window for
+the WiFi reset GPIO to be requested without pinctrl. With `gpio-ranges`
+in the device tree that window does not exist, and the fault persists.
 
 ### 4.3 Audio codec: mainline refuses version B
 
@@ -281,7 +332,11 @@ The vendor fbdev's ops carried the DMAMEM draw helpers but not the read
 and write pair, and had been relying on that fallback. Fixed in
 6bb9fb82405 by adding `__FB_DEFAULT_DMAMEM_OPS_RDWR`, as `drm_fbdev_dma`
 does for a kernel-mapped DMA buffer. If this trace appears, the kernel
-predates that commit.
+predates that commit. Verified on 0002: a full 480x480x4 read returns
+921600 bytes, a written pattern reads back, no WARN. Caveat for anyone
+using fb0 as a diagnostic: when screend has taken the display over DRM
+(fault screen, going-down), fb0 is the idle fbdev buffer and reads back
+what it holds, not what is on the glass.
 
 ### 4.8 Pre-existing noise, verified on a 6.1 boot of the same hardware
 
@@ -336,8 +391,9 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
 
 - Repair the GT911 config on every unit other than 0002 that booted a
   tip before 27e267ccb8e (4.5). 0002 is repaired and verified.
-- Confirm `/dev/fb0` reads on hardware after the fbdev read/write fix
-  (4.7); it has only been compiled.
+- WiFi SDIO is intermittent on 6.12 (4.2). Establish the pass rate, run
+  the clock comparison on a failing boot, then fix. This blocks calling
+  the port done.
 - The RS variant shares every fix here and has not been booted.
 - Branch naming: this is `claude/kernel-6-12-port-kg1g39`; it wants a
   `rithum-6.12` home.
