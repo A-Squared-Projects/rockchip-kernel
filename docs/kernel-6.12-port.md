@@ -9,8 +9,9 @@ silicon). Branch: `claude/kernel-6-12-port-kg1g39`, verified on hardware at
 merged on top.
 
 The short version: the port is 32-bit ARM, Thumb-2, same rkflash/SFTL
-NAND stack, same boot image layout. Two faults are still open: a reboot
-that can hang in the OP-TEE driver (section 4.7, mitigated) and
+NAND stack, same boot image layout. Two faults are still open: a
+use-after-free between an exiting TEE client and the OP-TEE shutdown path
+(section 4.7, trigger removed at reboot) and
 intermittent WiFi SDIO initialisation (section 4.2). No AArch64 switch was ever needed.
 What it did need was an inventory of everything Rockchip left unported
 for RK3308 on 6.12, and a complete carry-over of our own history, which
@@ -312,8 +313,10 @@ every Bluetooth firmware download. A Rockchip diagnostic in
 
 ### 4.7 Reboot can hang forever in the OP-TEE driver
 
-**Status: mitigated, root cause open.** About one reboot in six on 6.12
-never completes:
+**Status: trigger removed on the branch; the underlying use-after-free
+is still a latent bug that the 6.1 tree already documents.**
+
+About one reboot in six on 6.12 never completed:
 
     INFO: task reboot:1449 blocked for more than 122 seconds.
       __wait_for_common from optee_cq_wait_for_completion+0xf/0x32
@@ -321,41 +324,71 @@ never completes:
       __optee_disable_shm_cache from device_shutdown+0xc5/0x11c
       device_shutdown from kernel_restart+0x9/0x4c
 
-The shutdown itself runs to completion first (filesystems unmounted,
-`rkflash_shutdown:OK`), then `device_shutdown()` reaches the OP-TEE
-driver, which asks secure world to release its cached shared memory.
+The shutdown itself ran to completion first (filesystems unmounted,
+`rkflash_shutdown:OK`), then `device_shutdown()` reached the OP-TEE
+driver, which asks secure world to hand back its cached shared memory.
 OP-TEE answers that SMC with EBUSY while any secure thread is in use,
-and the driver waits, unbounded, for a completion that only a returning
-call posts. If whatever holds that thread never returns, the unit sits
-there until someone power-cycles it. The hardware watchdog cannot
-rescue it, because its petter is a userspace service that shutdown has
-already stopped. Every OTA ends in a reboot, so in the field this is an
-engineer visit, which is why it outranks the WiFi fault.
+and the driver waited, unbounded, for a completion that only a returning
+call posts. The hardware watchdog cannot rescue this: the driver core
+stops it when a reboot begins (`watchdog_stop_on_reboot`), and its
+userspace petter is already down. Every OTA ends in a reboot, so in the
+field this is an engineer visit.
 
-Not a fix: SysRq reboot around `device_shutdown()`. The console shows
-`rkflash_shutdown` completing just before the OP-TEE call, so skipping
-device shutdown also skips quiescing the SFTL NAND and its garbage
-collector.
+**This is the bug rithum-6.1 already knows about.** The shutdown script
+in meta-rithum (`rithum-shutdown`, comment block at lines 55-96) records
+the same event on 6.1.184 with a different symptom: a
+`refcount_t: underflow; use-after-free` in
+`tee_shm_fop_release -> tee_shm_put -> optee_shm_unregister ->
+optee_smc_do_call_with_arg -> tee_shm_put`, in `rithum-key-sign`, timed
+exactly after `rkflash_shutdown:OK`, followed by an Oops in an unrelated
+process on a page full of high-entropy bytes (secure world writing into
+a freed page) and a wedged reboot. `rithum-key-sign` is spawned by sshd
+per signature through HostKeyAgent to sign with the TEE host key; it is
+not a service, so the shutdown script's `sv d` sweep never reaps it, and
+one can be mid-exit, inside its shm-unregister call, when
+`device_shutdown()` starts. The reboot loop used to measure the WiFi
+rate (ssh in, reboot, repeat) is precisely the reproducer that comment
+asks for, which is why 6.12 hit it in six reboots where 6.1 saw it once
+in months.
 
-Mitigation on the branch: `optee_shutdown()` now gives up after five
-seconds, logs `optee: secure world still busy after 5000 ms, giving up
-on disabling the shm cache`, and lets the reset reclaim the cache. The
-remove and probe callers keep the unbounded wait. That bounds the cost
-at a slow reboot; it does not explain who is holding the secure thread.
+On both kernels the sequence is the same: shutdown disables the cache
+and frees the shm objects secure world hands back, while a client's call
+is still in flight and about to use one of them. On 6.1 that freed page
+was reused and written, and the machine wedged on the corruption. On
+6.12 the exiting task died inside its call, its secure thread was never
+released, and the shutdown wait never ended. The 6.1 comment names two
+candidate mechanisms (a stale cookie in secure world's RPC free, or
+kernel re-entrancy on the shm under unregister), rules out draining
+`/dev/tee0` before reboot, and notes that every relevant upstream and
+Rockchip fix was already in the crashing kernel, so a stable bump will
+not help.
 
-What is known about the cause: OP-TEE itself (3.13, unchanged BL32
-since 6.1) comes up clean every boot, and 6.1 reboots this hardware
-thousands of times without this, so the difference is in the normal
-world's shutdown. The waiting code in the driver is the same in 6.1 and
-6.12. A secure thread stays busy only while some normal-world caller is
-inside a call; the two classes that cannot be killed out of it are
-kernel-context callers (on this config: the OP-TEE hardware RNG client,
-the driver's own device enumeration) and any caller waiting on a
-tee-supplicant request when the supplicant is stopped but a request is
-mid-flight. To identify it, the next hang needs `echo w >
-/proc/sysrq-trigger` on the console (blocked tasks with stacks) and the
-order in which shutdown stops tee-supplicant relative to unmounting
-`/run/tee`.
+**What the branch does now** (92cabc42992, then the gating commit):
+
+- `optee_shutdown()` no longer touches the shm cache on a reboot or
+  power-off. Secure world's cache only matters to a kernel that runs
+  after this one without a reset, which is kexec; a reset clears secure
+  world with everything else. So the disable runs only when
+  `kexec_in_progress`, which this product never sets. That removes the
+  trigger: no cached shm is freed under a call in flight at shutdown.
+- For the kexec case the disable is bounded at five seconds and logs
+  `optee: secure world still busy after 5000 ms, giving up on disabling
+  the shm cache` before proceeding, so even there a stuck client costs
+  a slow reboot rather than a hung one.
+
+What this does not do: fix the use-after-free itself. If the same
+mechanism can fire outside shutdown, it still can. The 6.1 comment says
+telling the two mechanisms apart needs the RPC free cookie captured
+beside the shm under unregister. Until that measurement exists, the
+things to watch on every boot's pstore console are `refcount_t:
+underflow` and any Oops naming `tee_shm`, and the reboot loop remains
+the reproducer.
+
+Not a fix, recorded so nobody reaches for them: SysRq reboot around
+`device_shutdown()` (also skips `rkflash_shutdown`, trading a hang for
+NAND corruption); `watchdog.stop_on_reboot=0` on the command line (a
+backstop that would also hard-reset a legitimately slow shutdown;
+belongs to the boot image, not the kernel).
 
 ### 4.8 /dev/fb0 could not be read
 
@@ -439,8 +472,10 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
 
 - Repair the GT911 config on every unit other than 0002 that booted a
   tip before 27e267ccb8e (4.5). 0002 is repaired and verified.
-- Reboot hang in OP-TEE shutdown (4.7): mitigated by a bounded wait, root
-  cause open. Needs a SysRq task dump from the next occurrence.
+- OP-TEE shutdown (4.7): the reboot-time trigger is removed, the
+  use-after-free behind it is not fixed. Watch pstore for `refcount_t:
+  underflow` across the reboot loop; design the cookie capture the 6.1
+  comment asks for.
 - WiFi SDIO is intermittent on 6.12 (4.2). Establish the pass rate (4 of 8 boots so far), run the clock comparison on a failing
   boot, then fix. This blocks calling the port done.
 - The RS variant shares every fix here and has not been booted.
