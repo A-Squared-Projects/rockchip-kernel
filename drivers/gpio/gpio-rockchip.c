@@ -1298,8 +1298,10 @@ static void rockchip_gpio_remove(struct platform_device *pdev)
 		if (bank->irq_pins[i])
 			irq_set_chained_handler_and_data(bank->irq[i], NULL, NULL);
 	}
-	if (bank->domain)
+	if (bank->domain) {
+		irq_domain_remove_generic_chips(bank->domain);
 		irq_domain_remove(bank->domain);
+	}
 	if (bitmap_empty(bank->db_clk_bitmap, RK_GPIO_BANK_MAX_PIN))
 		clk_unprepare(bank->db_clk);
 	else
