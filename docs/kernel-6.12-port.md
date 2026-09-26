@@ -434,34 +434,47 @@ propagation to the PLLs, so the overlap is not a clock effect and is
 not new by construction; whether 6.1 has the same overlap is unknown,
 because no 6.1 timeline has been taken.
 
+The same timeline on 6.1 closes the NAND line: 6.1's attach (1.014 to
+1.044 s) sits inside its rksfc window (1.006 to 1.178 s) at the same
+phase of the burst, 8 to 11 ms in on all three boots, and succeeds
+first time. The overlap is not the difference. Two lessons from the
+same round:
+
+- Moving rksfc to `late_initcall` would have deadlocked the unit:
+  `dm_init_init` is a late_initcall that spins on `dm-mod.waitfor=31:6`
+  (the NAND block device, for the dm-verity root) and `md/` links
+  before `rkflash/`. The safe form is `device_initcall_sync`. Not run,
+  because after the 6.1 timeline it would only be a mitigation.
+- Six boots cannot tell 3 of 6 from 1 of 6. F2 (panel and backlight
+  disabled) went 3 of 6 then 0 of 6 on the same image; 3 of 12 has a
+  0.32 probability under the baseline rate. A 6 of 6 is solid (2e-5
+  under baseline); a 1 of 6 is baseline; anything in between needs
+  twelve or more boots before it means anything. F3 (audio) dropped as
+  low value.
+
 Where that leaves it. Everything readable from software is identical
 or non-discriminating: registers, clocks, pins, configs, bus rate,
 timing mode, sample phase, settling time, carried card state, probe
-order, host index, Bluetooth, USB overlap, dmesg concurrency, and the
-SDIO device tree. What remains:
+order, host index, Bluetooth, USB overlap, dmesg concurrency, switched
+loads, and the NAND overlap. One readable thing has not been compared:
+the GPIO controllers themselves. CRU, GRF and dw_mmc were dumped, but
+not the five GPIO banks' data, direction and external-port registers
+(0xff220000 to 0xff260000, offsets 0x00, 0x04 and 0x50), nor
+`/sys/kernel/debug/gpio`. Pinmux and pull live in GRF and are known
+identical; the level each GPIO output is driven to is off-SoC physical
+state (panel, amplifier, touch reset, WL_REG_ON, BT_REG_ON, host-wake)
+and lives only there. That is the last software-side comparison; after
+it, the bench:
 
-1. The same `initcall_debug` timeline on 6.1. If the SDIO attach does
-   not overlap the rksfc probe there, the overlap is the 6.1-versus-port
-   difference and the NAND burst is the prime suspect.
-2. A one-line kernel experiment that separates "inside the NAND burst"
-   from "early in the boot": move `rksfc_driver_init` from
-   `module_init` to `late_initcall` so the SDIO transaction keeps its
-   1.06 s slot and the NAND reads move after it. Six boots. 6 of 6 at
-   the unchanged time names the NAND burst; 1 of 6 says the burst is
-   innocent and the coupling is elsewhere. Diagnostic only; it does not
-   ship.
-3. Elimination variants on the unpatched port for the steady loads
-   (panel and backlight, audio), six boots each. The USB host cannot be
-   disabled remotely: ethernet is the RTL8152 behind it and it carries
-   the only way in on a failing boot.
-4. The bench: a scope on SDIO CLK and CMD across the switch on a
-   failing port boot and a passing 6.1 boot, and on the same trigger
-   vcc_io and vcc_1v8 at the WiFi module; and real power cycles on each
-   image. One cold boot of E passed first time, which at E's 1-in-6
-   warm rate is what chance gives once and is not evidence yet.
+1. A scope on SDIO CLK and CMD across the switch out of the init rate,
+   on a failing port boot and a passing 6.1 boot.
+2. On the same trigger, vcc_io and vcc_1v8 at the WiFi module over
+   1.05 to 1.25 s.
+3. Repeated real power cycles on each image. One cold boot of E passed
+   first time, which at E's 1-in-6 warm rate is what chance gives once.
 
-None of A to E, nor the `initcall_debug` or late_initcall builds, ship.
-They live on meta-rithum's local scratch branches marked diagnostic.
+None of A to E, nor the `initcall_debug` builds, ship. They live on
+meta-rithum's local scratch branches marked diagnostic.
 
 ### 4.3 Audio codec: mainline refuses version B
 
