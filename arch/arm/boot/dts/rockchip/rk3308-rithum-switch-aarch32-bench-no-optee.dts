@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Rithum Switch (rs), bench/development variant: identical to
+ * rk3308-rithum-switch-aarch32-bench.dts, for a trust.img with no BL32 -
+ * see rk3308-rithum-switch-no-optee.dtsi.
+ */
+
+/dts-v1/;
+
+#include "rk3308-rithum-switch.dtsi"
+
+/ {
+	model = "Rithum Switch";
+	compatible = "rithum,switch", "rockchip,rk3308";
+};
+
+#include "rk3308-rithum-switch-rs.dtsi"
+#include "rk3308-rithum-switch-bench.dtsi"
+#include "rk3308-rithum-switch-no-optee.dtsi"

@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Bench/development overlay: trades the SD card's full 4-bit data bus for
+ * a working UART2-M1 debug console. Must be #include'd AFTER
+ * rk3308-rithum-switch.dtsi (directly or via one of the per-variant
+ * rk3308-rithum-switch-{rs,rsp}.dtsi files) so this &sdmmc override wins
+ * over that file's production default - see the comment there for the
+ * board-level pin-conflict this works around. Not for production images:
+ * the sdcard-update feature needs the full 4-bit bus, which this
+ * intentionally gives up.
+ */
+&sdmmc {
+	bus-width = <1>;
+	pinctrl-0 = <&sdmmc_clk &sdmmc_cmd &sdmmc_det &sdmmc_bus1>;
+};
