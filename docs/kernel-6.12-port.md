@@ -4,8 +4,8 @@ What was learned bringing the RK3308 Rithum Switch kernel from the
 rithum-6.1 tree (Rockchip develop-6.1 plus upstream stable) onto Rockchip's
 develop-6.12, and what it cost. Written after the port booted and passed
 the same selftest as 6.1 on RithumSwitch-0002 (Switch Pro, RK3308 rev B
-silicon). Branch: `claude/kernel-6-12-port-kg1g39`, tip 4b5252bac91 at the
-time of writing, based on develop-6.12 (470f9dccb, 6.12.69) with v6.12.111
+silicon). Branch: `claude/kernel-6-12-port-kg1g39`, verified on hardware at
+49d61b7249d, based on develop-6.12 (470f9dccb, 6.12.69) with v6.12.111
 merged on top.
 
 The short version: the port is 32-bit ARM, Thumb-2, same rkflash/SFTL
@@ -233,12 +233,22 @@ write those bytes to 0x8047, then 0x01 to 0x8100.** Any unit that booted
 a branch tip before 27e267ccb8e needs it. Do not boot older tips on any
 unit.
 
+Done on 0002: driver unbound first so nothing could race a partial write
+into the chip's flash, all 185 bytes written, read back and compared
+byte-for-byte (X_max=480, Y_max=480, version 0x41, checksum 0x6b), then
+re-read before and after the next flash and boot. The overwrite is
+persistent, and so is the repair; after it, `SEND_CFG=0` leaves the
+chip alone. `/dev/input/event0` reports ABS_MT_POSITION_X/Y max 480.
+
 **ST7701 panel init.** The panel's controller is initialised over a
 3-wire 9-bit SPI bus that the RK3308 drives directly off GPIOs. Vendor
 6.12 panel-simple has only the hardware-SPI path; the board node is a
 root-level `simple-panel` with `spi-scl/sdi/cs-gpios`, which needs the
 GPIO bit-bang that rithum-6.1 added (0f00d47548f). Without it the VOP
-scans and fb0 exists but nothing is drawn after the first modeset.
+scans and fb0 exists but nothing is drawn after the first modeset. With
+it, on 0002: card0-DPI-1 connected and enabled at 480x480, backlight on,
+and the glass shows the UI and wakes, confirmed by eye rather than by
+any probe.
 
 **mcount stub.** See 3.1.
 
@@ -248,7 +258,18 @@ Thousands of `ttyS4: Frame error! / Break interrupt!` lines through
 every Bluetooth firmware download. A Rockchip diagnostic in
 `8250_port.c` that rithum-6.1 removed (6086eea0c699); cherry-picked.
 
-### 4.7 Pre-existing noise, verified on a 6.1 boot of the same hardware
+### 4.7 /dev/fb0 could not be read
+
+Every `read()` of `/dev/fb0` returned EINVAL, with a one-time WARN from
+`fb_read()`, while mmap and drawing worked, so the app never noticed.
+Since 6.5 the fbdev core refuses a read when the `fb_ops` has no
+`fb_read` instead of falling back to `screen_base` itself, and the
+vendor fbdev's ops carried the DMAMEM draw helpers but not the read and
+write pair. Fixed by adding `__FB_DEFAULT_DMAMEM_OPS_RDWR`, as
+`drm_fbdev_dma` does. This matters because several product diagnostics
+read framebuffer content to decide what is on screen.
+
+### 4.8 Pre-existing noise, verified on a 6.1 boot of the same hardware
 
 Do not chase these: `fiq_debugger: could not install nmi irq handler`,
 `sip_smc_get_dram_map: request share memory error!` and BL31's
@@ -288,7 +309,9 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   device enumerated. Touch was broken and the display unverified while
   both showed PASS. Read them as "probed", never as "works".
 - A grep of `/proc/interrupts` for the device name can miss an IRQ
-  registered under the driver name (`gt9xx`).
+  registered under the driver name (`gt9xx`). Absence from a grep is not
+  absence in fact; two early reports (a "missing" touch IRQ, and a
+  selftest touch PASS taken as working touch) were both this.
 - A shallow clone is not a history. Do the sweep in 2.1 before declaring
   a carry-over complete.
 - Compare fully resolved configs, not defconfigs (3.3).
@@ -297,8 +320,10 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
 
 ## 7. Open items
 
-- Repair the GT911 config on every unit that booted a tip before
-  27e267ccb8e (4.5). Confirm the panel draws, not just that fb0 exists.
+- Repair the GT911 config on every unit other than 0002 that booted a
+  tip before 27e267ccb8e (4.5). 0002 is repaired and verified.
+- Confirm `/dev/fb0` reads on hardware after the fbdev read/write fix
+  (4.7); it has only been compiled.
 - The RS variant shares every fix here and has not been booted.
 - Branch naming: this is `claude/kernel-6-12-port-kg1g39`; it wants a
   `rithum-6.12` home.
@@ -306,7 +331,7 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   `atags_to_fdt.c`, the `uart4_rts_pin` label fix.
 - Unit 0002's microphone, independent of the kernel.
 
-## 8. Commit map (470f9dccb..4b5252bac91)
+## 8. Commit map (470f9dccb..HEAD)
 
     fd2b768965d  rkflash: port the block glue to the 6.12 block layer
     051f93bf107  rkflash: reach user memory from the thumb SFTL blob through C
@@ -330,3 +355,5 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
     27e267ccb8e  input: gt9xx: stop overwriting the panel's GT911 config
     161e2f8fefc  rkflash: don't require FUNCTION_TRACER to link the ARM SFTL blobs
     4b5252bac91  drm/panel: rithum: bit-bang the ST7701 SPI init over GPIOs
+    49d61b7249d  docs: record what the 6.12 port found
+    6bb9fb82405  drm/rockchip: fbdev: give /dev/fb0 back its read and write file operations
