@@ -328,23 +328,84 @@ Physical state measured on the port (B image, unit 0002): SDIO_CON0
 0x314 0x7. All boots in every loop so far are warm reboots; nobody has
 seen a cold boot on either kernel, which needs the bench.
 
-What has never been done is a physical comparison with 6.1 on the same
-unit. Every register comparison so far is port-versus-port. The next
-result is a raw dump from a 6.1 boot and from a passing boot of the
-unpatched port: CRU 0xff500000 to 0xff500500 (PLL CONs at 0x00 to
-0x7f, CLKSEL_CON at 0x100, CLKGATE_CON at 0x300, SDIO_CON0/1 at
-0x488/0x48c), GRF 0xff000000 to 0xff000800 (iomux, pull, drive,
-SOC_CON0 at 0x300), the dw_mmc block 0xff4a0000 to 0xff4a0100 (CLKDIV
-0x08, CLKENA 0x10, TMOUT 0x14, FIFOTH 0x4c, UHS_REG 0x74), plus
-`clk_summary` and the pinctrl debugfs dumps. Any SDIO-relevant word
-that differs is the candidate; if nothing differs, the fault is in
-timing the card sees and not in anything the SoC is configured to do,
-and the bench (cold boots, a scope on CLK and CMD at the switch) is the
-next instrument.
+The physical comparison with 6.1 on the same unit has now been made
+(meta-rithum, three raw dumps on 0002: a 6.1 passing boot, a passing and
+a failing boot of the unpatched port at 555c18743d6, all warm reboots):
 
-Experiment A (100 ms post-power-on delay) and its 300 ms variant are
-workarounds either way; the variant only bounds how much wall-clock
-the card needs before the switch works, which is still worth knowing.
+- CRU 0xff500000 to 0x500: byte-identical across all three. Every PLL,
+  MODE_CON, the clk_sdio_div mux and divider, the gates, SDIO_CON0/1.
+- GRF 0xff000000 to 0x800: two words differ. 0x424 tracks the outcome
+  (0x70 on both passing boots, 0x20 on the failing one); it sits in the
+  CPU status block and its bits look like per-core WFI state, so it is
+  most likely read-time noise, to be confirmed by re-reading it several
+  times on one boot. 0x4a8 tracks the kernel (bit 23 set on the port,
+  clear on 6.1, identical on the port's pass and fail). It is not
+  referenced by any RK3308 driver in either tree, its upper half is
+  populated so it is a status word rather than a hiword-mask control
+  register, and it sits in the MAC block after MAC_CON0 at 0x4a0, whose
+  controller is disabled on this board. Being identical on pass and
+  fail it cannot decide the outcome.
+- dw_mmc 0xff4a0000 to 0x100: 6.1 pass versus port pass differ in one
+  word, the IDMAC descriptor base address. Port pass versus fail differ
+  only by the powered-off host after the failure.
+- pinmux and pinconf of pins 128 to 133: identical (an earlier claim of
+  the same was from an empty diff; this one is real, six lines each
+  way). Pull-up, 8 mA, Schmitt on, same groups. Elsewhere, pin 0 (the
+  WiFi host-wake line) is claimed on the port and unclaimed on 6.1: the
+  gpiod conversion in rfkill-wlan matches the board's
+  `WIFI,host_wake-gpios` property where 6.1 looked for
+  `WIFI,host_wake_irq` and never claimed it. It is requested as-is with
+  no direction change and is an input from the chip, not the data path.
+- `clk_summary`: no SDIO, PLL, WiFi or 32 kHz clock differs in rate,
+  parent or enable count.
+- The two kernels' `.config`: preemption, HZ, timers, SMP and the MMC
+  and WiFi options are identical; the 467 deltas are renamed or new
+  6.12 symbols and unrelated drivers.
+- Carried card state across the warm reboot: both outcomes occur with
+  the card carried live (6.1 to A: up; A to B: down), and 6.1 passes
+  after a boot that left the card in reset.
+
+Note for anyone scripting this: the SDIO host index is not stable
+across boots (`ff4a0000.mmc` came up as mmc0 or mmc1 on either kernel),
+so resolve it through `/sys/devices/platform/ff4a0000.mmc/mmc_host/`.
+`dw_mci/regs` in debugfs is absent on both images.
+
+So every SoC-side register, clock, pin and config that can be read is
+the same on a 6.1 passing boot and a port passing boot, and the code
+that sequences the switch (`dw_mci_set_ios`, `dw_mci_setup_bus`, the
+composite clock's set-rate-and-parent ordering) is identical too. The
+fault is in what the card sees, and it is frequency-independent (B).
+
+One hypothesis fits that shape and is testable from the layer. The
+first command that fails is the first one sent after `sdio_enable_hs`
+put the card into high-speed timing, where the card drives CMD on the
+rising clock edge instead of the falling one. The host samples at
+`rockchip,default-sample-phase`, which the rk3308 sdio node does not
+set, so 0 degrees: sampling on the same edge the card is switching on.
+That is a hold-time race, not a rate margin, which is why 25 MHz fails
+like 50 MHz; and a missed start bit gives a response timeout (-110)
+rather than a CRC error, which is what every failing attempt shows.
+No RK3308 board in the vendor tree sets a sample phase; many other
+Rockchip boards set 90 for exactly this reason. It does not explain on
+its own why 6.1 sits on the good side of the same race with identical
+SoC configuration; a race with near-zero margin can be moved by die
+temperature and supply noise, and the two kernels load the CPUs
+differently at 1 s, but that is conjecture until measured. Two one-line
+device-tree experiments decide it, six boots each, error counts per
+boot:
+
+- D: `rockchip,default-sample-phase = <90>;` on `&sdio`. If 6 of 6
+  with zero retries, this is the fix, and it is a legitimate one.
+- E: remove `cap-sd-highspeed` (and `sd-uhs-sdr104`) from `&sdio`, so
+  the card stays in default timing at 25 MHz. B already showed 25 MHz
+  in high-speed timing fails; if E passes, the timing mode is the
+  culprit, not the rate, independently of D.
+
+Variant C (`post-power-on-delay-ms = <300>`) is building and bounds how
+much wall-clock the card needs after reset release; it stays a
+workaround. If D and E both fail, the bench is next: a scope on SDIO
+CLK and CMD across the switch out of the init rate, and one cold boot
+on each image, which nobody has seen.
 
 ### 4.3 Audio codec: mainline refuses version B
 
