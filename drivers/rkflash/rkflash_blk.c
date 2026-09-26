@@ -34,6 +34,17 @@
 #include "rkflash_debug.h"
 #include "rk_sftl.h"
 
+/*
+ * The prebuilt SFTL blobs were assembled against the 6.1 slab API and call
+ * __kmalloc() directly. Since 6.10 that entry point is __kmalloc_noprof()
+ * behind the allocation-profiling hooks, so give the blobs the symbol they
+ * expect rather than regenerating four binaries.
+ */
+void *__kmalloc(size_t size, gfp_t flags)
+{
+	return kmalloc(size, flags);
+}
+
 void __printf(1, 2) sftl_printk(char *fmt, ...)
 {
 	va_list ap;
@@ -414,16 +425,16 @@ static int nand_gc_mythread(void *arg)
 	return 0;
 }
 
-static int rkflash_blk_open(struct block_device *bdev, fmode_t mode)
+static int rkflash_blk_open(struct gendisk *disk, blk_mode_t mode)
 {
 	return 0;
 }
 
-static void rkflash_blk_release(struct gendisk *disk, fmode_t mode)
+static void rkflash_blk_release(struct gendisk *disk)
 {
 };
 
-static int rkflash_blk_ioctl(struct block_device *bdev, fmode_t mode,
+static int rkflash_blk_ioctl(struct block_device *bdev, blk_mode_t mode,
 			 unsigned int cmd,
 			 unsigned long arg)
 {
@@ -472,15 +483,22 @@ static int rkflash_blk_add_dev(struct flash_blk_dev *dev,
 			       struct flash_blk_ops *blk_ops,
 			       struct flash_part *part)
 {
+	struct queue_limits lim = {
+		.max_hw_sectors = MTD_RW_SECTORS,
+		.max_segments = MTD_RW_SECTORS,
+		.max_hw_discard_sectors = UINT_MAX >> 9,
+		.discard_granularity = 64 << 9,
+	};
 	struct gendisk *gd;
 	int ret;
 
 	if (part->size == 0)
 		return -1;
 
-	gd = blk_mq_alloc_disk(blk_ops->tag_set, dev);
+	gd = blk_mq_alloc_disk(blk_ops->tag_set, &lim, dev);
 	if (IS_ERR(gd))
-		return -ENOMEM;
+		return PTR_ERR(gd);
+	blk_ops->rq = gd->queue;
 
 	dev->blk_ops = blk_ops;
 	dev->size = part->size;
@@ -511,7 +529,6 @@ static int rkflash_blk_add_dev(struct flash_blk_dev *dev,
 
 	gd->private_data = dev;
 	dev->blkcore_priv = gd;
-	gd->queue = blk_ops->rq;
 
 	if (part->type == PART_NO_ACCESS)
 		dev->disable_access = 1;
@@ -526,8 +543,10 @@ static int rkflash_blk_add_dev(struct flash_blk_dev *dev,
 		set_disk_ro(gd, 1);
 
 	ret = add_disk(gd);
-	if (ret)
+	if (ret) {
 		list_del(&dev->list);
+		put_disk(gd);
+	}
 
 	return ret;
 }
@@ -538,7 +557,6 @@ static int rkflash_blk_remove_dev(struct flash_blk_dev *dev)
 
 	gd = dev->blkcore_priv;
 	list_del(&dev->list);
-	gd->queue = NULL;
 	del_gendisk(gd);
 	put_disk(dev->blkcore_priv);
 	kfree(dev);
@@ -579,20 +597,6 @@ static int rkflash_blk_register(struct flash_blk_ops *blk_ops)
 				      BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_BLOCKING);
 	if (ret)
 		goto error2;
-	blk_ops->rq = blk_mq_init_queue(blk_ops->tag_set);
-	if (IS_ERR(blk_ops->rq)) {
-		ret = PTR_ERR(blk_ops->rq);
-		blk_ops->rq = NULL;
-		goto error2;
-	}
-
-	blk_ops->rq->queuedata = dev;
-
-	blk_queue_max_hw_sectors(blk_ops->rq, MTD_RW_SECTORS);
-	blk_queue_max_segments(blk_ops->rq, MTD_RW_SECTORS);
-
-	blk_queue_max_discard_sectors(blk_ops->rq, UINT_MAX >> 9);
-	blk_ops->rq->limits.discard_granularity = 64 << 9;
 
 	if (g_flash_type == FLASH_TYPE_SFC_NAND || g_flash_type == FLASH_TYPE_NANDC_NAND)
 		nand_gc_thread = kthread_run(nand_gc_mythread, (void *)blk_ops, "rkflash_gc");
@@ -605,12 +609,14 @@ static int rkflash_blk_register(struct flash_blk_ops *blk_ops)
 	part.name[0] = 0;
 	ret = rkflash_blk_add_dev(dev, blk_ops, &part);
 	if (ret)
-		goto error2;
+		goto error3;
 
 	rkflash_blk_create_procfs();
 
 	return 0;
 
+error3:
+	blk_mq_free_tag_set(blk_ops->tag_set);
 error2:
 	kfree(blk_ops->tag_set);
 error1:
@@ -630,6 +636,8 @@ static void rkflash_blk_unregister(struct flash_blk_ops *blk_ops)
 
 		rkflash_blk_remove_dev(dev);
 	}
+	blk_mq_free_tag_set(blk_ops->tag_set);
+	kfree(blk_ops->tag_set);
 	unregister_blkdev(blk_ops->major, blk_ops->name);
 }
 

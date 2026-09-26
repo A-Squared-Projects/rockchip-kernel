@@ -5,6 +5,7 @@
 #ifndef __RK_SFTL_H
 #define __RK_SFTL_H
 
+void *__kmalloc(size_t size, gfp_t flags);
 u32 ftl_low_format(void);
 int sftl_init(void);
 int sftl_deinit(void);
