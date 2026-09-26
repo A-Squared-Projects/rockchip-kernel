@@ -372,44 +372,70 @@ that sequences the switch (`dw_mci_set_ios`, `dw_mci_setup_bus`, the
 composite clock's set-rate-and-parent ordering) is identical too. The
 fault is in what the card sees, and it is frequency-independent (B).
 
-One hypothesis fits that shape and is testable from the layer. The
-first command that fails is the first one sent after `sdio_enable_hs`
-put the card into high-speed timing, where the card drives CMD on the
-rising clock edge instead of the falling one. The host samples at
-`rockchip,default-sample-phase`, which the rk3308 sdio node does not
-set, so 0 degrees: sampling on the same edge the card is switching on.
-That is a hold-time race, not a rate margin, which is why 25 MHz fails
-like 50 MHz; and a missed start bit gives a response timeout (-110)
-rather than a CRC error, which is what every failing attempt shows.
-No RK3308 board in the vendor tree sets a sample phase; many other
-Rockchip boards set 90 for exactly this reason. It does not explain on
-its own why 6.1 sits on the good side of the same race with identical
-SoC configuration; a race with near-zero margin can be moved by die
-temperature and supply noise, and the two kernels load the CPUs
-differently at 1 s, but that is conjecture until measured. Two one-line
-device-tree experiments decide it, six boots each, error counts per
-boot:
+Two more device-tree experiments, six boots each, both clean negatives
+(meta-rithum, properties verified on the running kernel):
 
-- D: `rockchip,default-sample-phase = <90>;` on `&sdio`. If 6 of 6
-  with zero retries, this is the fix, and it is a legitimate one.
-- E: remove `cap-sd-highspeed` (and `sd-uhs-sdr104`) from `&sdio`, so
-  the card stays in default timing at 25 MHz. B already showed 25 MHz
-  in high-speed timing fails; if E passes, the timing mode is the
-  culprit, not the rate, independently of D.
+- D, `rockchip,default-sample-phase = <90>` on `&sdio`: 1 of 6. SDIO_CON1
+  went from 0x0 to 0x2 and stayed there, so the property reaches the
+  hardware and CON1 really is the sample phase. Moving the sample edge
+  does not help.
+- E, `cap-sd-highspeed` and `sd-uhs-sdr104` removed: 1 of 6, at 25 MHz
+  in default timing. With B (25 MHz in high-speed timing) also failing,
+  the timing mode is not the culprit. The high-speed hold-race
+  hypothesis above is dead; it is left in place so nobody re-runs it.
 
-Variant C (`post-power-on-delay-ms = <300>`): 6 of 6 up, retries on 2
-of 6 boots. With A alongside, the bound is monotonic and has no cliff:
+The table:
 
-    none    1 of 6 up, four retries then give up on 5 of 6
-    100 ms  6 of 6 up, two retries on 5 of 6
-    300 ms  6 of 6 up, one retry on 2 of 6
+    variant  change                          rate  retries on failing boots
+    none     unpatched 555c18743d6           1/6   4, then give up
+    A        post-power-on-delay-ms 100      6/6   2 on five of six
+    B        max-frequency 25 MHz            1/6   4
+    C        post-power-on-delay-ms 300      6/6   1 on two of six
+    D        default-sample-phase 90         1/6   4
+    E        no highspeed, no sdr104         1/6   4
+    6.1.188  control                         6/6   0
 
-A fixed settling requirement would show a threshold; this shifts a
-near-zero-margin race. A and C are bounds, not fixes, and must not
-ship. D is in flight on its own scratch branch with A, B and C absent
-and the property verified on the device. If D and E both fail, the
-bench is next: a scope on SDIO CLK and CMD across the switch out of
-the init rate, and one cold boot on each image, which nobody has seen.
+Correction to what A and C mean. The interval from the pwrseq
+allocation to the first 400 kHz command is 11 to 20 ms on 6.1 (6 of 6
+pass) and 12 to 16 ms on failing port boots, so the card is not short
+of settling time; 6.1 gives it less and works. What C changes is when
+in the boot the transaction happens: first command at about 1.23 s
+instead of about 0.92 s. The defensible statement is: on the port, the
+SDIO transaction at about 0.92 s mostly fails and the same transaction
+at about 1.23 s works; on 6.1 it works at 0.92 s. A and C relocate the
+transaction; they do not restore a 6.1 behaviour. A per-boot check of
+what dmesg shows as concurrently active within 5 ms of the first
+command does not discriminate either (passing and failing boots both
+occur with zero and with several concurrent lines, and 6.1 passes with
+more concurrent activity than some failing port boots).
+
+Where that leaves it. Everything readable from software is identical
+or non-discriminating: registers, clocks, pins, configs, bus rate,
+timing mode, sample phase, settling time, carried card state, probe
+order, host index, Bluetooth, USB overlap, dmesg concurrency, and the
+SDIO device tree. Three things remain, in cost order:
+
+1. A probe timeline that does not depend on drivers printing:
+   `initcall_debug` on the kernel command line (no build) lists every
+   probe with a timestamp and duration. What is probing in the window
+   0.85 to 1.0 s on a failing port boot, a passing port boot and a 6.1
+   boot, especially silent power users (the USB host VBUS regulator
+   and hub, the panel enable and backlight PWM, the speaker and
+   headphone amplifier controls, the LED driver), is the list of
+   candidates for a supply-side coupling into the WiFi module.
+2. Elimination by variant, one node at a time on the unpatched port,
+   six boots each: USB host controllers disabled; panel and backlight
+   disabled; audio card disabled. A variant that goes to 6 of 6 names
+   the coupling; if none does, the coupling is not on the board's
+   switched loads.
+3. The bench: a scope on SDIO CLK and CMD across the switch out of the
+   init rate on a failing port boot and a passing 6.1 boot, and on the
+   same trigger the WiFi module's supply rails (VBAT and the 1.8 V
+   I/O rail); and one real power cycle on each image, since every one
+   of the forty-odd loop boots is a warm reboot.
+
+None of A to E ship. They live on meta-rithum's local scratch branches
+marked diagnostic.
 
 ### 4.3 Audio codec: mainline refuses version B
 
