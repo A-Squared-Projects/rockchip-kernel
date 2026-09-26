@@ -304,11 +304,21 @@ static void optee_enable_shm_cache(struct optee *optee)
  * @is_mapped:	true if the cached shared memory addresses were mapped by this
  *		kernel, are safe to dereference, and should be freed
  */
-static void __optee_disable_shm_cache(struct optee *optee, bool is_mapped)
+static void __optee_disable_shm_cache(struct optee *optee, bool is_mapped,
+				      unsigned long timeout)
 {
+	unsigned long deadline = jiffies + timeout;
 	struct optee_call_waiter w;
 
-	/* We need to retry until secure world isn't busy. */
+	/*
+	 * We need to retry until secure world isn't busy. With a nonzero
+	 * @timeout the retrying is bounded: secure world answers EBUSY for
+	 * as long as any of its threads is in use, and if the normal-world
+	 * task holding that thread never returns there is nothing to wait
+	 * for. On the shutdown path that would otherwise hang the reboot
+	 * for good, so give up after @timeout and let the reset reclaim
+	 * the cache.
+	 */
 	optee_cq_wait_init(&optee->call_queue, &w, false);
 	while (true) {
 		union {
@@ -333,8 +343,18 @@ static void __optee_disable_shm_cache(struct optee *optee, bool is_mapped)
 			shm = reg_pair_to_ptr(res.result.shm_upper32,
 					      res.result.shm_lower32);
 			tee_shm_free(shm);
-		} else {
+		} else if (!timeout) {
 			optee_cq_wait_for_completion(&optee->call_queue, &w);
+		} else {
+			unsigned long left = deadline - jiffies;
+
+			if (time_after_eq(jiffies, deadline) ||
+			    !optee_cq_wait_for_completion_timeout(&optee->call_queue,
+								  &w, left)) {
+				pr_warn("optee: secure world still busy after %u ms, giving up on disabling the shm cache\n",
+					jiffies_to_msecs(timeout));
+				break;
+			}
 		}
 	}
 	optee_cq_wait_final(&optee->call_queue, &w);
@@ -347,8 +367,15 @@ static void __optee_disable_shm_cache(struct optee *optee, bool is_mapped)
  */
 static void optee_disable_shm_cache(struct optee *optee)
 {
-	return __optee_disable_shm_cache(optee, true);
+	return __optee_disable_shm_cache(optee, true, 0);
 }
+
+/*
+ * How long a reboot may wait for secure world to release its cached shared
+ * memory before giving up. Generous next to a normal call, short next to a
+ * unit that never comes back.
+ */
+#define OPTEE_SHUTDOWN_SHM_CACHE_TIMEOUT_MS	5000
 
 /**
  * optee_disable_unmapped_shm_cache() - Disables caching of shared memory
@@ -358,7 +385,7 @@ static void optee_disable_shm_cache(struct optee *optee)
  */
 static void optee_disable_unmapped_shm_cache(struct optee *optee)
 {
-	return __optee_disable_shm_cache(optee, false);
+	return __optee_disable_shm_cache(optee, false, 0);
 }
 
 #define PAGELIST_ENTRIES_PER_PAGE				\
@@ -1467,7 +1494,8 @@ static void optee_shutdown(struct platform_device *pdev)
 	struct optee *optee = platform_get_drvdata(pdev);
 
 	if (!optee->rpc_param_count)
-		optee_disable_shm_cache(optee);
+		__optee_disable_shm_cache(optee, true,
+			msecs_to_jiffies(OPTEE_SHUTDOWN_SHM_CACHE_TIMEOUT_MS));
 }
 
 #ifdef CONFIG_OPTEE_INSECURE_LOAD_IMAGE
