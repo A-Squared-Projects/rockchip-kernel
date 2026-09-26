@@ -1113,6 +1113,13 @@ static void rockchip_gpio_remove_cpuhp(void)
 	mutex_unlock(&irq_affinity_mutex);
 }
 
+static void rockchip_clk_put(void *data)
+{
+	struct clk *clk = data;
+
+	clk_put(clk);
+}
+
 static int rockchip_gpio_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1169,8 +1176,14 @@ static int rockchip_gpio_probe(struct platform_device *pdev)
 		bank->db_clk = devm_clk_get(dev, "db");
 		if (IS_ERR(bank->db_clk)) {
 			bank->db_clk = of_clk_get(dev->of_node, 1);
-			if (IS_ERR(bank->db_clk))
+			if (IS_ERR(bank->db_clk)) {
 				bank->db_clk = NULL;
+			} else {
+				ret = devm_add_action_or_reset(dev, rockchip_clk_put,
+							       bank->db_clk);
+				if (ret)
+					return ret;
+			}
 		}
 	}
 
@@ -1280,6 +1293,13 @@ static void rockchip_gpio_remove(struct platform_device *pdev)
 	mutex_unlock(&irq_affinity_mutex);
 	rockchip_gpio_remove_cpuhp();
 
+	irq_set_chained_handler_and_data(bank->irq[0], NULL, NULL);
+	for (int i = 1; i < RK_GPIO_IRQ_MAX_NUM; i++) {
+		if (bank->irq_pins[i])
+			irq_set_chained_handler_and_data(bank->irq[i], NULL, NULL);
+	}
+	if (bank->domain)
+		irq_domain_remove(bank->domain);
 	if (bitmap_empty(bank->db_clk_bitmap, RK_GPIO_BANK_MAX_PIN))
 		clk_unprepare(bank->db_clk);
 	else
