@@ -334,17 +334,13 @@ a failing boot of the unpatched port at 555c18743d6, all warm reboots):
 
 - CRU 0xff500000 to 0x500: byte-identical across all three. Every PLL,
   MODE_CON, the clk_sdio_div mux and divider, the gates, SDIO_CON0/1.
-- GRF 0xff000000 to 0x800: two words differ. 0x424 tracks the outcome
-  (0x70 on both passing boots, 0x20 on the failing one); it sits in the
-  CPU status block and its bits look like per-core WFI state, so it is
-  most likely read-time noise, to be confirmed by re-reading it several
-  times on one boot. 0x4a8 tracks the kernel (bit 23 set on the port,
-  clear on 6.1, identical on the port's pass and fail). It is not
-  referenced by any RK3308 driver in either tree, its upper half is
-  populated so it is a status word rather than a hiword-mask control
-  register, and it sits in the MAC block after MAC_CON0 at 0x4a0, whose
-  controller is disabled on this board. Being identical on pass and
-  fail it cannot decide the outcome.
+- GRF 0xff000000 to 0x800: identical once the three volatile words are
+  excluded. A first pass reported 0x424 tracking the outcome and 0x4a8
+  tracking the kernel; five back-to-back reads on one boot showed both
+  moving between reads (0x424, 0x48c and 0x4a8 are live status words,
+  the other 509 are stable). Both were single-sample noise. No stable
+  GRF word separates 6.1 from the port, or a passing boot from a
+  failing one.
 - dw_mmc 0xff4a0000 to 0x100: 6.1 pass versus port pass differ in one
   word, the IDMAC descriptor base address. Port pass versus fail differ
   only by the powered-off host after the failure.
@@ -401,11 +397,19 @@ boot:
   in high-speed timing fails; if E passes, the timing mode is the
   culprit, not the rate, independently of D.
 
-Variant C (`post-power-on-delay-ms = <300>`) is building and bounds how
-much wall-clock the card needs after reset release; it stays a
-workaround. If D and E both fail, the bench is next: a scope on SDIO
-CLK and CMD across the switch out of the init rate, and one cold boot
-on each image, which nobody has seen.
+Variant C (`post-power-on-delay-ms = <300>`): 6 of 6 up, retries on 2
+of 6 boots. With A alongside, the bound is monotonic and has no cliff:
+
+    none    1 of 6 up, four retries then give up on 5 of 6
+    100 ms  6 of 6 up, two retries on 5 of 6
+    300 ms  6 of 6 up, one retry on 2 of 6
+
+A fixed settling requirement would show a threshold; this shifts a
+near-zero-margin race. A and C are bounds, not fixes, and must not
+ship. D is in flight on its own scratch branch with A, B and C absent
+and the property verified on the device. If D and E both fail, the
+bench is next: a scope on SDIO CLK and CMD across the switch out of
+the init rate, and one cold boot on each image, which nobody has seen.
 
 ### 4.3 Audio codec: mainline refuses version B
 
