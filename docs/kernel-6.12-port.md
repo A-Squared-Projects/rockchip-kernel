@@ -671,7 +671,7 @@ The two halves are bisected separately:
   sits at 0.76 s against 1.07 s on the port, but it moves the primary
   loss of margin into the 6.6-to-6.12.69 half, 113k commits, and out
   of anything inherited from before 6.6 (superseded: pooled 6.6 is
-  16 of 20, one band with 6.12.69). The sixth boot stranded on
+  13 of 17, one band with 6.12.69). The sixth boot stranded on
   the vendor-storage fault above (the layer's serial fallback handled
   an empty read, not a hung one); the blob fix at 02e174bf1be removes
   the fault itself.
@@ -794,10 +794,10 @@ The two halves are bisected separately:
   clear. The table:
 
       6.1.188                          12 of 12
-      6.6.89                           8 of 8, then 8 of 12 (16 of 20)
+      6.6.89                           5 of 5, then 8 of 12 (13 of 17)
       6.12.69 pre-merge, plain         7 of 12
       6.12.69 pre-merge + rithum stack 10 of 12
-      6.12.111 port                    1 of 6 (needs twelve)
+      6.12.111 port                    2 of 12
 
   The 6.12.69-to-6.12.111 stable span is the only established step
   (below). Two candidates that
@@ -880,8 +880,10 @@ The two halves are bisected separately:
   **The 6.6 anchor came back 8 of 12** (ff18b4898c2 as 6.6.89, gated,
   vendor storage confirmed working first, same bimodal signature, no
   underflows). That was the question the two-drops model rested on, and
-  the answer is no. Pooled 6.6 is 16 of 20; against 6.12.69's 17 of 24
-  that is p about 0.5, and the two 6.6 runs are consistent with each
+  the answer is no. Pooled 6.6 is 13 of 17 (the first run has five
+  capture files, not eight: boot six stranded and two were counted from
+  console logs, corrected by meta-rithum); against 6.12.69's 17 of 24
+  that is p about 0.75, and the two 6.6 runs are consistent with each
   other (p about 0.11), so pooling is fair. The first 8 of 8 was the
   tail: at 71 percent, eight passes in a row happen about 6 percent of
   the time. There is no 6.6-to-6.12.69 regression. Everything from 6.6
@@ -903,9 +905,9 @@ The two halves are bisected separately:
   device.h -45 against the port and nothing else.
 
   **"6.1 is clean" is a twelve-boot claim** and it is not established
-  either: 12 of 12 against 6.6's 16 of 20 is p about 0.12. 6.1 does
+  either: 12 of 12 against 6.6's 13 of 17 is p about 0.056, borderline. 6.1 does
   look different in kind (twelve boots with zero -110 anywhere, against
-  sixteen on 6.6), but if 6.1 is really nearer 85 percent this is not a
+  sixteen errors on 6.6), but if 6.1 is really nearer 85 percent this is not a
   6.12 regression at all; it is a marginal fault every kernel on this
   board has, which something in the stable window made much worse.
   That changes what a successful probe-ready revert means: restoring
@@ -935,18 +937,48 @@ The two halves are bisected separately:
   the port itself (ready for its twelve boots and the reads). Unit 0002
   is free; the vendor-devkey test is deferred.
 
-  Run order: the port's twelve boots first, because the port is the
-  baseline the probe-ready revert is measured against and 1 of 6 is
-  not a rate (the reads ride along: OPP debugfs `u_volt_target`,
-  vdd_core, pwm0 duty, cpufreq state, dmesg `volt-sel`/`pvtm`/`idc`,
-  and the pwrseq probe timestamps that give the reset-pulse length);
-  then `exp-revert-probe-ready`; then twelve more 6.1 boots to settle
+  **Port: 2 of 12** (vehicle 0f04763d9166, code-identical to the tip,
+  gated on kernel and VERSION_ID), 40 errors, no underflows, bimodal.
+  The 1 of 6 is confirmed at 16 percent. The stable-window drop is now
+  twelve boots at each end: 6.12.69 at 17 of 24 against the port at
+  2 of 12 is p about 0.002.
+
+  **DVFS reads on the port, steady state at 302 s**: vdd_core
+  950120 uV enabled; pwm0 period 5000 ns, duty 1200 ns, inverse;
+  governor interactive on cpufreq-dt at 408 MHz; dmesg carries only
+  the two rockchip-pvtm probes at 0.686 s and 0.687 s because the
+  `volt-sel` prints went from `dev_info` to `dev_dbg` between 6.6 and
+  the port (which is what earlier looked like the selection not
+  running). The OPP table is the proper substitute and it is
+  byte-identical on 6.6.89 and the port, every field:
+
+      rate 408000000   uV 950000   min 950000   max 1325000
+      rate 600000000   uV 950000   min 950000   max 1325000
+      rate 816000000   uV 975000   min 975000   max 1325000
+      rate 1008000000  uV 1050000  min 1050000  max 1325000
+
+  So the same volt-sel tier is applied on the passing and the failing
+  kernel and the OTP/PVTM adjustment does the same thing on both. Two
+  details close it from the other side: 408 and 600 MHz share 950 mV,
+  so the rail does not move across most of what the CPU does during
+  boot, and the whole span the rail can traverse is 100 mV, inside
+  which `exp-no-cpufreq` held it at 1011680 uV and still gave 4 of 12.
+  DVFS is closed in both directions: identical state on passing and
+  failing kernels, and removing it does not help.
+
+  **Decision rule for `exp-revert-probe-ready`, fixed before its
+  result** (twelve boots running, gated on VERSION_ID 44ffdd03b68a,
+  measured against the port's 2 of 12): 8 or 9 of 12 means
+  `88e338bd9b6` is the cause; 2 to 4 means it is not and `.90` is
+  next; 5 or 6 is ambiguous at this sample and needs another twelve.
+  Then the twelve 6.1 boots.
+
+  Run order: the port's twelve boots and reads are done (above; the
+  pwrseq probe timestamps for the reset-pulse length are still to be
+  pulled from the captures); `exp-revert-probe-ready` is running; then twelve more 6.1 boots to settle
   whether 6.1 is at 100 percent or in the band; then `.90` if the
-  revert does not move the rate. The port's gate has passed and its
-  DVFS reads are being taken with cpufreq present, then its twelve
-  boots and probe-ready's twelve run unattended. Both images report
-  6.12.111, so only the VERSION_ID stamp separates them; every flash
-  gates on it.
+  revert does not move the rate. Both 6.12.111 images report the same kernel version, so only the
+  VERSION_ID stamp separates them; every flash gates on it.
 
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
@@ -1259,7 +1291,7 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   underflow` across the reboot loop; design the cookie capture the 6.1
   comment asks for.
 - WiFi SDIO is intermittent on 6.12 (4.2): 6.1 passes 12 of 12 on the
-  same unit, 6.6 16 of 20, 6.12.69 17 of 24, the port 1 of 6.
+  same unit, 6.6 13 of 17, 6.12.69 17 of 24, the port 2 of 12.
   Everything readable on the SoC side is identical between the
   kernels; DVFS, bus rate, timing mode and sample phase are excluded,
   and 6.6 to 6.12.69 is one band. The 6.12.69-to-6.12.111 stable span
@@ -1272,10 +1304,67 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   calling the port done.
 - The RS variant shares every fix here and has not been booted.
 - Branch naming: this is `claude/kernel-6-12-port-kg1g39`; it wants a
-  `rithum-6.12` home.
+  `rithum-6.12` home. This document and the regulator fix also live on
+  `claude/port-findings`, branched from rithum-6.1, so they survive the
+  port branch (9).
 - Upstream candidates: `gpio-ranges` for rk3308.dtsi, `__NO_FORTIFY` in
   `atags_to_fdt.c`, the `uart4_rts_pin` label fix.
 - Unit 0002's microphone, independent of the kernel.
+
+## 9. What survives if 6.12 is abandoned
+
+Most of this document is about the RK3308 board and its vendor blobs,
+not about 6.12. If the port is dropped, or parked until the SDIO
+regression is found, the following stand on their own and want carrying
+to whatever tree ships. Each names the section with the detail and the
+commit that holds the change, so they can be cherry-picked or re-done
+without this branch.
+
+Applies to rithum-6.1 today:
+
+- Regulator debug-list race (4.10). The vendor `regulator_debug_list`
+  is appended without a lock from asynchronous probes and corrupts
+  intermittently; latent in 6.1, boot-killing on 6.6. Fix is a mutex
+  around the two list operations: 8a97f566878 on the port,
+  ff18b4898c2 on the 6.6 branch. `claude/port-findings` carries it
+  cherry-picked onto rithum-6.1.
+- GT911 touch config is flash-resident and any tree built with the
+  vendor gt9xx driver's `GTP_DRIVER_SEND_CFG` rewrites it (4.5). Guard
+  27e267ccb8e; restore recipe and the anti-downgrade version-byte
+  caveat in the config file header (487b21b62cc). Every unit that ever
+  booted an unguarded tree needs the restore.
+- Bootargs live in the signed FIT's DTB `/chosen/bootargs` (4.2); there
+  is no on-device environment, so a "cmdline-only" change is an image
+  rebuild.
+- `rksfc_driver_init` must not move to `late_initcall` because dm-init
+  waits on it (`dm-mod.waitfor`); `device_initcall_sync` is the latest
+  safe level (4.2).
+- The WiFi SDIO investigation (4.2): the failure signature, everything
+  shown identical between kernels, the retired hypotheses, the rates,
+  and the delay bound. On 6.1 this is a 12 of 12 result against a
+  borderline 6.6 (p about 0.056), so 6.1 may itself sit at the top of
+  an 80 percent band; twelve more 6.1 boots settle that and are in the
+  queue regardless of the port's fate.
+- Evidence rules (6) and the merge method for stable into a vendor
+  tree (5).
+
+Applies to any base newer than 6.1, whichever it is:
+
+- SFTL blob `file_operations` layout (3.1): offsets 40 and 44 baked into
+  the blob; 6.6 breaks it, 6.12 works by coincidence; `static_assert`
+  pin 9adeb81c34c, table-shift recipe 02e174bf1be.
+- rkflash queue swap panics on any block layer from 6.2 (4.2, the 6.6
+  entry): keep the disk's own queue, 9f76f114ed2.
+- SFTL `__kmalloc` wrapper for 6.10 and later, Thumb-2 uaccess shims,
+  `__gnu_mcount_nc` stub, decompressor FORTIFY guard, low ZRELADDR (3.1,
+  3.2).
+- `savedefconfig` renames and the hardware RNG omission (3.3).
+- The 6.6 branch `claude/bisect-6.6` (ff18b4898c2) is a bootable
+  develop-6.6 with all of the above applied and 13 of 17 on WiFi; it is
+  the nearest fallback base if 6.12 is dropped, minus display and
+  touch.
+- Upstream candidates (7): `gpio-ranges` for rk3308.dtsi, `__NO_FORTIFY`
+  in `atags_to_fdt.c`, the `uart4_rts_pin` label.
 
 ## 8. Commit map (470f9dccb..HEAD)
 
