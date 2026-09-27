@@ -1341,6 +1341,34 @@ The two halves are bisected separately:
   therefore not properties of those kernels but of how often the race
   was lost on them.
 
+  **Pad-voltage audit of the other five banks** (Alex's question; the
+  schematic's IO PowerDomain table on sheet 2 rendered by meta-rithum,
+  against the DT supplies and the steady SOC_CON0 0x194 decode):
+
+      bank    table default            DT supply         kernel mode
+      VCCIO0  3.3 V                    vcc_io 3.3        3.3   agree
+      VCCIO1  3.3 V, PMUIO             vcc_io 3.3        3.3   agree
+      VCCIO2  1.8 V, LCDC, I2S0        vcc_1v8 1.8       1.8   agree
+      VCCIO3  1.8 V default, eMMC      vcc_io 3.3        3.3   strapped
+      VCCIO4  1.8 V, WiFi (SDIO)       vccio_sdio 1.8    1.8   agree
+      VCCIO5  3.3 V, SDMMC             vcc_io 3.3        3.3   agree
+
+  VCCIO2, the only other 1.8 V bank and the one that would have been
+  the damaging direction if wrong, is 1.8 V by table, DT and register;
+  it is the display and I2S0 bank, and the pad mode being right means
+  it does not bear on unit 0002's microphone fault. VCCIO3 does not use
+  the table's default and that is by design: it is the one bank U-Boot
+  senses at runtime, reading the GPIO0_A4 strap and setting IOVSEL3,
+  then handing the select to GRF (bit 8, IOVSEL3_CTRL, set by U-Boot,
+  which is why the kernel does not name it). 3.3 V pads on a 3.3 V rail
+  is consistent, not dangerous. No bank is fed 1.8 V while held in
+  3.3 V mode, so VCCIO4 was the only copy of the fault. Bit 7 of
+  SOC_CON0 is set by none of U-Boot's writes (TPL touches bit 4 only,
+  `rk_board_init` bits 3 and 8) and so comes from the factory Boot1 or
+  reset state; it is identical on every capture and every kernel. No
+  separate RS or RSP power sheets exist in the document and no variant
+  DTS overrides the six supplies.
+
   Still open, in order:
 
   1. Cold boots. Every one of the 130-plus boots in this investigation
@@ -1369,18 +1397,30 @@ The two halves are bisected separately:
      written; one line, exactly what 6.1 does, not upstreamable as a
      fix for one board's convenience but acceptable in a vendor tree).
      Ship the DT supply plus one guarantee.
-     Prepared as `claude/fix-sdio-iodomain-order` (e8c0e241870): the
-     port plus `vqmmc-supply = <&vccio_sdio>` on the sdio node and
-     `PROBE_FORCE_SYNCHRONOUS` on `regulator-fixed`, both with comments
-     pointing here. Not tested on hardware; it runs only if the
-     mechanism test lands and must reproduce that image's rate before
-     it ships. Expected to reach sshd. Its target is now known: 12 of
-     12 with zero errors, on twelve boots.
+     **Confirmed: `claude/fix-sdio-iodomain-order` (e8c0e241870) is 12
+     of 12 with zero errors** on the base that gives 2 of 12 without
+     it: `vqmmc-supply = <&vccio_sdio>` on the sdio node plus
+     `PROBE_FORCE_SYNCHRONOUS` on `regulator-fixed`, both commented.
+     The defensible form reproduces the one-line experiment exactly.
+     It is cherry-picked onto the port branch; whether the
+     vendor-tree change to fixed-regulator probing is acceptable to
+     ship is Alex's call, and the DT line stands on its own as the
+     correct hardware description either way.
 
-     The root fix is in U-Boot and is staged, not first. The write that
-     hands the kernel VCCIO4 in 3.3 V mode is in TPL, the first stage,
-     unconditional for all rk3308, and its stated purpose is protection
-     against chip damage on boards that supply 3.3 V there. Every
+     The root fix is in the bootloader and is staged, not first. The
+     write in U-Boot's TPL that selects 3.3 V for VCCIO4 is the
+     documented intent (protection against chip damage on boards that
+     supply 3.3 V there), but TPL never runs on these units: the
+     BootROM boots the factory Boot1 v1.24 from NAND blocks no tool can
+     write, and the shipped MiniLoaderAll.bin is maskrom recovery only,
+     uploaded to RAM. So the 3.3 V hand-off comes from the factory
+     loader, and the fix goes in U-Boot proper, which is shipped:
+     meta-rithum has a Kconfig-gated VCCIO4_1V8 write in
+     `rk_board_init` next to the existing VCCIO3 one, verified in the
+     built binary as the hiword-update word for bit 4, and is running
+     the unmodified port kernel with it, so only the pad mode differs
+     and the race is still present. 12 of 12 there would make the
+     kernel fix belt to the bootloader's braces rather than the fix. Every
      rithum variant inherits `vccio4-supply = <&vccio_sdio>` = vcc_1v8
      from the voice-module dtsi and none overrides it (checked by
      meta-rithum across -switch, -rs, -rsp and -bench), so VCCIO4_1V8
@@ -1402,8 +1442,8 @@ The two halves are bisected separately:
      this way", and the change is in TPL, so the remaining step is a
      one-line BOM confirmation (R2224 fitted, R2226 not) from whoever
      owns it. Not a meter, not a per-variant measurement.
-     Deploying it also means replacing TPL: a bad bootchain write on
-     this board is a maskrom brick, SD boot is impossible because the
+     Deploying it still means a bootchain write: a bad one on this
+     board is a maskrom brick, SD boot is impossible because the
      SD pins are muxed with UART2, and recovery is USB maskrom with
      physical access; the field path is the live bootchain rewrite,
      already the riskiest operation in the update tooling. So: better
@@ -1735,13 +1775,13 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   use-after-free behind it is not fixed. Watch pstore for `refcount_t:
   underflow` across the reboot loop; design the cookie capture the 6.1
   comment asks for.
-- WiFi SDIO (4.2): cause found and confirmed 12 of 12 on the mechanism
-  test. To ship: `claude/fix-sdio-iodomain-order` (DT supply plus
-  synchronous fixed-regulator probe) must reproduce 12 of 12 on
-  hardware; then cold boots; then the U-Boot VCCIO4 change behind a BOM
-  check and a bootchain review. The delay variants A and C are
-  withdrawn. The port is no longer blocked on this once the fix branch
-  is verified.
+- WiFi SDIO (4.2): fixed. The kernel-side fix (DT supply plus
+  synchronous fixed-regulator probe) is 12 of 12 on hardware and is on
+  this branch. Still to do: cold boots; the U-Boot proper VCCIO4 change
+  (built by meta-rithum, being tested with the unmodified port kernel)
+  behind a BOM check and a bootchain review; Alex's decision on
+  shipping the fixed-regulator probe change versus the DT line alone.
+  The delay variants A and C are withdrawn.
 - The RS variant shares every fix here and has not been booted.
 - Branch naming: this is `claude/kernel-6-12-port-kg1g39`; it wants a
   `rithum-6.12` home. This document and the regulator fix also live on
