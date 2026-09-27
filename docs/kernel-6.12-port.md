@@ -738,6 +738,28 @@ The two halves are bisected separately:
   voltages and the steady rail match 6.1's and the no-cpufreq image
   runs at the port's rate, this line is dead and the bench decides.
 
+  **Correction on A and C (meta-rithum):** the post-power-on delay is
+  the only intervention that has ever moved the rate, and it is
+  dose-dependent. Total -110s across six boots: 20 with no delay, 10
+  at 100 ms, 3 at 300 ms, with the delay arms 12 of 12 up against the
+  port's 1 of 6, while B, D and E are identical to baseline at 1 of 6
+  and 20 errors each. That is a settling effect after the pwrseq
+  releases WL_REG_ON, not anything about the switch itself, and the
+  errors do not vanish, so it is margin. It was recorded above as "not
+  restoring a 6.1 behaviour" because 6.1 needs no delay; that is
+  true and beside the point. What 6.1 does differently is still the
+  question, but the delay says what kind of thing it is: something
+  that makes the card need about 300 ms after reset release on the
+  port and none on 6.1. Two kernel-side candidates for that have not
+  been read: how long the reset was held before release (the pwrseq
+  claims the line asserted at its own probe and holds it until the
+  host powers up, so the pulse is "probe of sdio-pwrseq" to "allocated
+  mmc-pwrseq", which the G captures hold for 6.1, the port and 6.6), and
+  what the module's rails do across that pulse, which is the bench.
+  pre-merge-plus-rithum is running at 5 of 6 with one four-error boot
+  so far, so the post-merge rithum commits are not implicated. All of
+  the above is warm reboots; cold boots may differ.
+
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
   unit until it has booted somewhere: a boot on the layer's QEMU
