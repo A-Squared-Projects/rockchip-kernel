@@ -810,6 +810,7 @@ The two halves are bisected separately:
       6.6.89                           5 of 5, then 8 of 12 (13 of 17)
       6.12.69 pre-merge, plain         7 of 12
       6.12.69 pre-merge + rithum stack 10 of 12
+      6.12.90 (pre-merge + v6.12.90)   8 of 12
       6.12.111 port                    2 of 12
 
   The 6.12.69-to-6.12.111 stable span is the only established step
@@ -1197,9 +1198,14 @@ The two halves are bisected separately:
   regulator debug-list lock (4.10) stays needed for the other async
   regulator drivers.
 
-  Run order now: `.90` is at 5 of 6 with six to go, tracking the .69
-  band (the regression would then sit in .90 to .111); tests 1 and 2
-  above are zero-build and go ahead of any new tag branch; then
+  **`.90`: 8 of 12** (818307b7b44 as 6.12.90, gated), 16 errors, no
+  underflows: the same point as .69 (p about 1.0) and different from
+  the port (p about 0.019). The stable regression is in v6.12.91 to
+  v6.12.111, 21 tags; `.100` (8b433a4890f) splits it and is running.
+  The saradc test runs on the port afterwards, not on a bisection
+  point, because initcall_debug's printk load changes timing on a
+  timing-sensitive fault and the two questions must not share a
+  vehicle. Run order now: `.100`; then tests 1 and 2 above; then
   `exp-sync-fixed-regulator`; then `.80` or `.100` by its result. The reset
   pulse itself is not in any capture (above) and waits on the bench.
   Both 6.12.111 images report the same kernel version, so only the
