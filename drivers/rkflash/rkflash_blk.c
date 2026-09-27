@@ -35,6 +35,21 @@
 #include "rk_sftl.h"
 
 #include <linux/uaccess.h>
+
+/*
+ * The prebuilt SFTL blobs carry a static struct file_operations for
+ * /dev/vendor_storage. As shipped, the ioctl handler sits at byte
+ * offset 40 with a copy at 44: unlocked_ioctl and compat_ioctl in the
+ * kernel the blobs were built against (and again in 6.12, which added
+ * fop_flags before llseek). 6.6 dropped the iterate slot, so here
+ * they are at 36 and 40, and the tables in rk_sftl_arm_v7*.S are
+ * shifted to match. A mismatch is silent at build time and shows up
+ * as vendor storage returning nothing, so pin it here.
+ */
+static_assert(offsetof(struct file_operations, unlocked_ioctl) == 36,
+	      "SFTL blob vendor_storage fops: unlocked_ioctl offset changed");
+static_assert(offsetof(struct file_operations, compat_ioctl) == 40,
+	      "SFTL blob vendor_storage fops: compat_ioctl offset changed");
 /* The SFTL blob reaches user memory through these. A bl straight from the .S
  * to arm_copy_{from,to}_user skips the uaccess domain window, so the copy
  * takes a page domain fault under CONFIG_CPU_SW_DOMAIN_PAN - going through C

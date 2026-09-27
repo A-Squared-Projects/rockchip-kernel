@@ -15339,10 +15339,10 @@ __func__.0:
 	.type	rk_sftl_vendor_storage_fops, %object
 	.size	rk_sftl_vendor_storage_fops, 128
 rk_sftl_vendor_storage_fops:
-	.space	40
+	.space	36
 	.word	rk_sftl_vendor_storage_ioctl
 	.word	rk_sftl_vendor_storage_ioctl
-	.space	80
+	.space	84
 	.data
 	.align	2
 	.set	.LANCHOR2,. + 0
