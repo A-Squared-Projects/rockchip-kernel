@@ -512,10 +512,19 @@ The two halves are bisected separately:
 
 - The stable span, by intermediate tags. Every one of the 43 tags is
   an ancestor of v6.12.111. Three points are pushed, each the
-  pre-merge tree (`claude/bisect-pre-merge-6.12.69`, 8fbd6a00c3d) with
-  one stable tag merged: `claude/bisect-6.12.80` (1a5bbe7f798),
-  `claude/bisect-6.12.90` (5efa36aeaaf) and `claude/bisect-6.12.100`
-  (7f574f49199). Conflicts were resolved by one rule: a file stable
+  pre-merge tree (`claude/bisect-pre-merge-6.12.69`, now 52b828114cc
+  with the GT911 guard on top) with one stable tag merged and the
+  guard added on top: `claude/bisect-6.12.80` (a2c8bbcd0be),
+  `claude/bisect-6.12.90` (818307b7b44) and `claude/bisect-6.12.100`
+  (8b433a4890f). Their earlier tips (1a5bbe7f798, 5efa36aeaaf,
+  7f574f49199) and the pre-merge base at 8fbd6a00c3d lacked the guard
+  and must not be booted: that recipe left `27e267ccb8e` out as
+  irrelevant to a WiFi measurement, which was wrong, because without it
+  the vendor driver reprograms the touch controller's flash on every
+  boot (4.5). Unit 0002 was clobbered by the pre-merge and the first
+  .90 boots and has been restored; the pre-merge 7 of 12 was measured
+  with a mis-flashed touch controller, which does not affect the wlan0
+  numbers. Conflicts were resolved by one rule: a file stable
   never touched again after that tag takes the v6.12.111 merge's
   resolution verbatim, and a file it did touch again takes that
   resolution with the later stable commits reverse-applied (the mmc
@@ -608,9 +617,18 @@ in X and 480/1200 in Y. The rithum-6.1 commit (bf08379c811) sets
 `SEND_CFG=0` and archives the factory config as
 `drivers/input/touchscreen/gt9xx/GT911_Rithum_480x480_Config.cfg`, a
 byte-exact dump from a pristine unit. **Repair for a clobbered unit:
-write those bytes to 0x8047, then 0x01 to 0x8100.** Any unit that booted
-a branch tip before 27e267ccb8e needs it. Do not boot older tips on any
-unit.
+write those bytes to 0x8047, then 0x01 to 0x8100, with the version byte
+raised above the one the chip holds.** The controller silently ignores
+a config whose version byte is lower than the stored one: the generic
+table carries 0x47, the factory file 0x41, so writing the file as-is is
+accepted without error and changes nothing. Bump byte 0 (0x48 was used
+on 0002 the second time) and recompute the checksum at offset 184 so
+the sum of 0x8047..0x80FF is zero modulo 256; every other byte stays
+factory-exact. Read 0x8047 back afterwards. A stored version above
+0x47 also stops the generic table installing again on that chip; a
+chip still at 0x41 is unprotected. Any unit that booted a tree without
+the guard needs the repair. Do not boot such trees on any unit; see
+4.2 for the bisection branches that did.
 
 Done on 0002: driver unbound first so nothing could race a partial write
 into the chip's flash, all 185 bytes written, read back and compared
