@@ -118,6 +118,29 @@ for the Thumb-2 build (a `bl` straight into `arm_copy_from_user` skips
 the domain window under `CPU_SW_DOMAIN_PAN`) and, for the non-Thumb blob
 only, a `__gnu_mcount_nc` stub because it was compiled with `-pg`.
 
+There is a fourth dependency the blob has on the kernel that nothing in
+the build checks: the layout of `struct file_operations`. The SFTL
+blob creates `/dev/vendor_storage` itself, from a static
+`file_operations` table baked into the object with the ioctl handler
+at byte 40 and a second copy at 44, which is where `unlocked_ioctl`
+and `compat_ioctl` sat in the kernel it was built against (6.1's
+layout, and 5.10's). Every other slot is zero. **The port works only
+by coincidence**: 6.6 dropped the `iterate` slot, which moves both
+fields to 36 and 40, and 6.12 then added the 4-byte `fop_flags` at the
+top of the struct, which moves them back to 40 and 44. The 6.12 port
+never fell over it because the two mainline changes cancel. The 6.6
+bisection branch did fall over it (4.2): the blob's handler landed on
+`compat_ioctl`, `unlocked_ioctl` stayed NULL, every ioctl on the
+device returned ENOTTY, and the SFTL still printed its init-ok line,
+so the symptom was an empty serial number and a random MAC two
+services later, not an error at the source. There is no way to see
+this from the C side because the table is in the blob; the port pins
+it instead with two `static_assert`s on the offsets in `rkflash_blk.c`
+(9adeb81c34c), so the next `file_operations` change fails the build
+rather than the device. Any future base needs those two numbers
+checked against `include/linux/fs.h` first, and the two blob tables
+shifted as on the 6.6 branch (02e174bf1be) if they moved.
+
 ### 3.2 FORTIFY_SOURCE in the decompressor
 
 With GCC and `CONFIG_FORTIFY_SOURCE`, `atags_to_fdt.c` fails to link:
@@ -568,7 +591,8 @@ The two halves are bisected separately:
   ZRELADDR, the decompressor FORTIFY guard, the SFTL link stub and
   thumb shims, the uart4 label fix, the rithum boards, the defconfig
   re-canonicalised for 6.6 (`CONFIG_DEBUG_WX`, and the GT911 driver
-  left out because develop-6.6's copy does not compile there), the
+  left out because the vendor driver still calls
+  `of_get_named_gpio_flags`, which 6.6 removed), the
   OP-TEE reboot gate, and a block-glue signature port for rkflash
   (develop-6.6 still carries the pre-6.5 `fmode_t` signatures). The
   vendor codec and the pre-conversion gpio driver are already there.
@@ -1219,6 +1243,12 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
 - Compare fully resolved configs, not defconfigs (3.3).
 - Clang and GCC disagree about frame sizes and about fortify; a
   clang-only build proves less than it looks like (3.2, 3.4).
+- A closed blob's success message is not evidence that what it set
+  up works. The SFTL reported vendor storage init ok with a dead ioctl
+  table; the first real check is the consumer (`vendor-serial` exit
+  status, a non-random MAC), and any structure layout a blob bakes in
+  gets a `static_assert` in the C that links it (3.1).
+
 
 ## 7. Open items
 
