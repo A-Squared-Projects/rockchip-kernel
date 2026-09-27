@@ -633,9 +633,12 @@ The two halves are bisected separately:
   vendor path is otherwise identical to the port's after carrying the
   SFC unaligned-access check (5d36ec40bf0) that develop-6.6 predates;
   the 8250 LSR diagnostic drop is carried too so the console is
-  readable. The 6.6 branch is rebuilt at 02e174bf1be and, per the
-  rule below, its next boot is console-attended: expected to reach
-  sshd, not yet shown to.
+  readable. A second boot-killer on 6.6 was the regulator debug-list race
+  (4.10), which also strands the board before init, intermittently.
+  The 6.6 branch is rebuilt at ff18b4898c2 with every fix (queue, RNG,
+  SFC check, blob fops shift, regulator lock, 8250 diagnostic drop) and,
+  per the rule below, its next boot is console-attended: expected to
+  reach sshd with a serial and a MAC, not yet shown to.
 
   **6.6 result: 5 of 5 clean**, plus a console-attended first-attempt
   attach and a live check, seven clean boots and not one -110. Five is
@@ -913,6 +916,35 @@ predates that commit. Verified on 0002: a full 480x480x4 read returns
 using fb0 as a diagnostic: when screend has taken the display over DRM
 (fault screen, going-down), fb0 is the idle fbdev buffer and reads back
 what it holds, not what is on the glass.
+
+### 4.10 Regulator debug list corrupted by concurrent probes
+
+Found on the 6.6 bisection image, present in this port and in
+rithum-6.1. The vendor regulator core keeps a private list of debugfs
+helpers (`regulator_debug_list`) and appends to it in
+`rdev_init_debugfs()` with a bare `list_add()`, after
+`regulator_register()` has dropped `regulator_list_mutex`.
+`regulator-fixed` probes asynchronously, so on a four-core boot several
+fixed regulators register at once from `events_unbound` workers and two
+inserts can interleave. With list debugging on, that is:
+
+    list_add corruption. next->prev should be prev (...), but was ...
+    kernel BUG at lib/list_debug.c:29!
+    Workqueue: events_unbound async_run_entry_fn
+     __list_add_valid_or_report from rdev_init_debugfs
+     rdev_init_debugfs from regulator_register
+     regulator_register from devm_regulator_register
+     devm_regulator_register from reg_fixed_voltage_probe
+     ... from __driver_attach_async_helper
+
+The dying worker is the async probe worker and it exits with IRQs off,
+so the async probe chain never completes; `dm-init` then waits for
+device probing forever ("waiting for all devices to be available") and
+the board never reaches init. It fired at 0.19 s on one 6.6 boot in
+six and would look, from outside, like every other strand. The fix
+(8a97f566878 here, ff18b4898c2 on the 6.6 branch) gives the list its
+own mutex around the insert and the removal loop. rithum-6.1 carries
+the same code and the same exposure.
 
 ### 4.9 Pre-existing noise, verified on a 6.1 boot of the same hardware
 
