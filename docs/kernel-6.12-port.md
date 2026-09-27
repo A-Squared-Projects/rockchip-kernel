@@ -580,25 +580,42 @@ The two halves are bisected separately:
   commensurable with the three points above. No display on this
   image: the panel bit-bang path is not carried.
 
-  **fbd75edae26 stranded unit 0002.** It boots, brings up eth0 and
-  DHCP, and opens no port; ssh is the only way in and flashing needs
-  ssh, so recovery is the bench (maskrom or the serial console). The
-  cause is not known from outside. One real omission was found from
-  the resolved config: the image had no Rockchip hardware RNG driver
-  (the 6.12 canonicalisation dropped a line 6.6 needs, see 3.3),
-  which is fixed on the branch. Whether that is the cause depends on
-  what blocked at S50; meta-rithum's candidate is that dropbear's
-  host key is TEE-derived and the OP-TEE client path does not come up
-  on the 6.6 base. The console will say: `optee` probe lines, `crng
-  init done`, and what state the key agent and dropbear are in. Do
-  not flash this branch to any unit until that is answered.
+  **fbd75edae26 stranded unit 0002 with a kernel panic at 1.3 s**, in
+  a reboot loop, read off the serial console: NULL dereference at
+  0x118 in `kobject_get`, from `elv_register_queue` via
+  `blk_register_queue` and `device_add_disk`, from `rkflash_dev_init`
+  in `rksfc_probe`. Nothing in userspace ever ran; the pings and DNS
+  answers that suggested a live, port-less unit came from something
+  else on the range. The cause: develop-6.6's rkflash allocates the
+  gendisk with `blk_mq_alloc_disk()` and then swaps in a second queue
+  from `blk_mq_init_queue()`. Since 6.2 the queue's sysfs kobject
+  lives in the gendisk and `elv_register_queue()` reaches it through
+  `q->disk`, which only the queue `blk_mq_alloc_disk()` made has set;
+  the swapped queue has `q->disk` NULL, and 0x118 is the queue kobject
+  offset in a NULL gendisk plus the kref. My first 6.6 port changed
+  only the fops signatures and left the swap in; the 6.12 port had
+  already removed it, so the fix (9f76f114ed2) is the same shape:
+  keep the disk's own queue, apply the limits to it, free the tag set
+  on unregister. It compiles; it has not been booted, and this path
+  only runs on hardware with the SFC NAND, so a QEMU boot cannot
+  exercise it. A separate real omission found from the resolved
+  config, the Rockchip hardware RNG driver being off, is fixed too
+  (8c618fec6d9, see 3.3) but was not the cause.
+
+  Two rules from this. Every branch states whether it is expected to
+  reach sshd, and a tree from a new vendor base does not go on a bench
+  unit until it has booted somewhere: a boot on the layer's QEMU
+  machine catches anything before the platform probes, and anything
+  in a platform probe needs a hand-check of every block, DT and
+  driver-core API the vendor base predates, which is what was missed
+  here.
 
   Every branch now states whether it is expected to reach sshd. The
   6.12-based points (`bisect-pre-merge-6.12.69`, `.80`, `.90`, `.100`,
   `pre-merge-plus-rithum`) are the port's own config and drivers with
   only the stable span varied, and the pre-merge tree reached sshd on
-  twelve boots, so they are expected to. `bisect-6.6` is not, until
-  the bench says why.
+  twelve boots, so they are expected to. `bisect-6.6` at 9f76f114ed2 has the panic fixed and is still
+  unbooted; it needs a console-attended first boot.
 
 Until that is done, the port ships without WiFi being reliable, or it
 does not ship. A and C are not acceptable substitutes: they relocate
