@@ -801,7 +801,7 @@ The two halves are bisected separately:
   the four gpio-rockchip fixes that sit on the pwrseq reset path, are
   clear. The table:
 
-      6.1.188                          12 of 12
+      6.1.188                          12 of 12, then 12 of 12 (24 of 24, 0 errors)
       6.6.89                           5 of 5, then 8 of 12 (13 of 17)
       6.12.69 pre-merge, plain         7 of 12
       6.12.69 pre-merge + rithum stack 10 of 12
@@ -1023,10 +1023,70 @@ The two halves are bisected separately:
   visible in the timestamps, which is consistent with everything else
   this fault has done.
 
-  Run order now: the twelve 6.1 boots are running (gated on 6.1.188
-  and its vehicle) and settle which of the two readings above applies;
-  then `claude/bisect-6.12.90` (818307b7b44), already pushed, splits
-  the stable window; then `.80` or `.100` by its result. The reset
+  **6.1: 12 of 12 again, 24 of 24 pooled, zero -110 in any boot**
+  (aa63807cb3fd as 6.1.188, gated). 24 of 24 against 6.6's 13 of 17 is
+  p about 0.02, so 6.1 against 6.6 crosses from borderline to
+  established, and the first of the two readings above is the one that
+  applies. The three steps:
+
+      6.1 -> 6.6            24 of 24 -> 13 of 17   real,    p about 0.02
+      6.6 -> 6.12.69        13 of 17 -> 17 of 24   nothing, p about 0.75
+      6.12.69 -> 6.12.111   17 of 24 -> 2 of 12    real,    p about 0.002
+
+  **The consequence, which belongs in section 9 as much as here:
+  closing the stable window cannot produce a clean 6.12 port.** That
+  window owns the collapse from about 71 to 17 percent. Close it
+  perfectly and the port returns to the 6.6/6.12.69 band at about 76
+  percent, not to 6.1's 100. The remaining 24 points arrived with the
+  vendor 6.6 base and have been carried unchanged through every 6.12
+  point measured. The `.90` bisection is still the right spend, since a
+  named commit for the larger drop is worth having whether or not 6.12
+  ships, but its result must not be reported as fixing the SDIO fault.
+  On current evidence the port's ceiling is about 76 percent per boot
+  unless the second window is also opened.
+
+  **The 6.1-to-6.6 SDIO path, read in full.** Costing the drivers/mmc
+  swap by the files actually on the path (dw_mmc core, pltfm and
+  rockchip glue; mmc core, host, bus; the sdio files; pwrseq;
+  slot-gpio) instead of the whole directory:
+
+      6.1 -> 6.6         15 files,  153 / 84 lines   (rate moves)
+      6.6 -> 6.12.69     12 files,  374 / 243 lines  (rate does not)
+      6.12.69 -> port     1 file,    23 / 5 lines    (rate collapses)
+
+  The first of those is small enough to read, and it was: nothing in
+  it changes behaviour on this board. The vendor `no-low-pwr` property
+  and its handling in dw_mmc were dropped in develop-6.6 and are back
+  in develop-6.12, but no rk3308 DTS on any tree sets it, so it is a
+  no-op on all three; the low-power clock-gating logic that runs
+  without it is identical. The thunder-boot FIFO reset at power-up is
+  compiled out on every tree (`CONFIG_ROCKCHIP_THUNDER_BOOT` unset in
+  the 6.1 config and the port's). `slot->mrq` is cleared earlier in
+  `dw_mci_request_end`, a teardown-ordering fix that runs after a
+  response, not before one. The rest is `remove_new`, const uevent
+  signatures, `devm_mmc_alloc_host`, SoCFPGA phase code, debugfs
+  ifdef removal, a log line for non-removable cards and a random API
+  rename. So the 24-point drop is not in drivers/mmc's SDIO path, and
+  the whole-directory swap is predicted negative before it is built;
+  the other 117 files in that directory are other hosts, the block
+  layer glue and eMMC/SD code the SDIO attach never runs. The 6.1 to
+  6.6 difference lives outside drivers/mmc: in the SoC-side drivers
+  already read as functionally identical between 6.1 and the port
+  (clk, pinctrl, gpio, io-domain, regulator, pwm, rfkill), in arch/arm
+  and core kernel timing, in what else probes concurrently and loads
+  the module's rails, or in the toolchain each vehicle was built with,
+  which has not been checked and is the cheapest question left.
+
+  One DT line falls out of the read as a candidate mitigation, not a
+  difference: `no-low-pwr` on the sdio node, which the port already
+  parses, keeps the card clock running between commands from slot init
+  instead of only after the WiFi driver claims its SDIO interrupt. It
+  has a stated mechanism (a continuously clocked card holds its state
+  across the rate change) and no boot-time cost, but it is in the same
+  class as A and C: it would hide the margin, not explain it.
+
+  Run order now: `claude/bisect-6.12.90` (818307b7b44) is running and
+  splits the stable window; then `.80` or `.100` by its result. The reset
   pulse itself is not in any capture (above) and waits on the bench.
   Both 6.12.111 images report the same kernel version, so only the
   VERSION_ID stamp separates them; every flash gates on it.
@@ -1347,8 +1407,9 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   kernels; DVFS, bus rate, timing mode and sample phase are excluded,
   and 6.6 to 6.12.69 is one band. The 6.12.69-to-6.12.111 stable span
   is the only established step (single-commit test
-  `exp-revert-probe-ready` negative; midpoint `.90` next). Whether 6.1 is truly clean
-  or at the top of the band needs twelve more 6.1 boots. The bench
+  `exp-revert-probe-ready` negative; midpoint `.90` next). 6.1 is 24 of 24; every newer
+  base is at about 76 percent, so closing the stable window alone
+  leaves that ceiling (9). The bench
   (scope on WL_REG_ON, CLK, CMD and the module's rails across the clock
   switch; real power cycles) is next if the software bisection does
   not land. The delay variants A and C are not fixes. This blocks
@@ -1392,10 +1453,14 @@ Applies to rithum-6.1 today:
   safe level (4.2).
 - The WiFi SDIO investigation (4.2): the failure signature, everything
   shown identical between kernels, the retired hypotheses, the rates,
-  and the delay bound. On 6.1 this is a 12 of 12 result against a
-  borderline 6.6 (p about 0.056), so 6.1 may itself sit at the top of
-  an 80 percent band; twelve more 6.1 boots settle that and are in the
-  queue regardless of the port's fate.
+  and the delay bound. rithum-6.1 is 24 of 24 with zero errors; every
+  newer vendor base measured (6.6, 6.12.69) sits at about 76 percent,
+  and the 6.12 stable span from .69 to .111 drops that to 17. **The
+  ceiling for any port on a vendor base newer than 6.1 is about 76
+  percent per boot until the 6.1-to-6.6 difference is found**, and
+  that difference is not in drivers/mmc's SDIO path (read in full). A
+  decision to bail on 6.12 should weigh that a 6.6-based port carries
+  the same ceiling.
 - Evidence rules (6) and the merge method for stable into a vendor
   tree (5).
 
@@ -1413,7 +1478,7 @@ Applies to any base newer than 6.1, whichever it is:
 - The 6.6 branch `claude/bisect-6.6` (ff18b4898c2) is a bootable
   develop-6.6 with all of the above applied and 13 of 17 on WiFi; it is
   the nearest fallback base if 6.12 is dropped, minus display and
-  touch.
+  touch, and it carries the 76 percent ceiling above.
 - Upstream candidates (7): `gpio-ranges` for rk3308.dtsi, `__NO_FORTIFY`
   in `atags_to_fdt.c`, the `uart4_rts_pin` label.
 
