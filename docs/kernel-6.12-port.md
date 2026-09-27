@@ -1846,10 +1846,13 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   is the same history and can go once nothing points at it. This
   document and the regulator debug-list fix also live on
   `claude/port-findings`, branched from rithum-6.1, for merging there.
-  The eleven diagnostic branches are deleted; their tips are all parents
-  of the content-free commit on `claude/archive-6.12-port-diagnostics`,
-  whose README lists them, so every hash in this document still
-  resolves (10).
+  The eleven diagnostic branches are archived: their tips are all
+  parents of the content-free commit on
+  `claude/archive-6.12-port-diagnostics`, whose README lists them, so
+  every hash in this document resolves without them. Deleting the
+  branch refs themselves needs a credential that may delete refs on
+  this remote (the port session's could not); one `git push origin
+  --delete` with the eleven names in section 10 does it.
 - Upstream candidates: `gpio-ranges` for rk3308.dtsi, `__NO_FORTIFY` in
   `atags_to_fdt.c`, the `uart4_rts_pin` label fix.
 - Unit 0002's microphone, independent of the kernel.
@@ -1973,7 +1976,8 @@ Kept:
   parents are the eleven diagnostic tips below; its README repeats this
   table.
 
-Deleted, reachable from the archive commit by hash:
+Archived, to be deleted (every tip is a parent of the archive
+commit, so nothing is lost by deleting them):
 
     a2c8bbcd0be  bisect-6.12.80            pre-merge + v6.12.80 + guard
     818307b7b44  bisect-6.12.90            pre-merge + v6.12.90 + guard        8 of 12
