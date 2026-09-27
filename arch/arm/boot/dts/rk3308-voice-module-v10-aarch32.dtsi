@@ -275,6 +275,21 @@
 	max-frequency = <110000000>;
 	bus-width = <4>;
 	cap-sd-highspeed;
+	/*
+	 * The SDIO bank (VCCIO4) is supplied at 1.8 V and the loader hands
+	 * it over in 3.3 V pad mode; the io-domain driver corrects it once
+	 * this regulator has registered. Naming the supply makes the host
+	 * wait for that regulator rather than attaching on the pwrseq alone.
+	 *
+	 * This kernel does not need it to be correct - its fixed regulators
+	 * register synchronously at subsys_initcall, so the io-domain has
+	 * always set the pad mode before dw_mmc attaches, and this board is
+	 * 24/24 with no -110 without it. From v6.4 regulator-fixed probes
+	 * asynchronously and the same DT omission costs ten boots in twelve.
+	 * The property is here because it describes the hardware, and so the
+	 * two kernels do not differ in what they claim about it.
+	 */
+	vqmmc-supply = <&vccio_sdio>;
 	no-sd;
 	no-mmc;
 	ignore-pm-notify;
