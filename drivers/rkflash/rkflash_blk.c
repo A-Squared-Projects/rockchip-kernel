@@ -58,6 +58,21 @@ unsigned long ftl_copy_to_user(void __user *to, const void *from,
  * behind the allocation-profiling hooks, so give the blobs the symbol they
  * expect rather than regenerating four binaries.
  */
+/*
+ * The prebuilt SFTL blobs carry a static struct file_operations for
+ * /dev/vendor_storage with the ioctl handler at byte offset 40 (and a
+ * copy at 44), which is where unlocked_ioctl and compat_ioctl sat in
+ * the kernel they were built against. The layout has moved since: 6.6
+ * dropped the iterate slot (offset 36) and 6.12 added fop_flags before
+ * llseek (offset 40 again, by coincidence). A mismatch is silent at
+ * build time and shows up as vendor storage returning nothing, so pin
+ * the assumption here and fail the build when it stops holding.
+ */
+static_assert(offsetof(struct file_operations, unlocked_ioctl) == 40,
+	      "SFTL blob vendor_storage fops: unlocked_ioctl offset changed");
+static_assert(offsetof(struct file_operations, compat_ioctl) == 44,
+	      "SFTL blob vendor_storage fops: compat_ioctl offset changed");
+
 void *__kmalloc(size_t size, gfp_t flags)
 {
 	return kmalloc(size, flags);
