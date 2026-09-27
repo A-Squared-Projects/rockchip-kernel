@@ -389,15 +389,7 @@ static struct platform_driver regulator_fixed_voltage_driver = {
 	.probe		= reg_fixed_voltage_probe,
 	.driver		= {
 		.name		= "reg-fixed-voltage",
-		/*
-		 * Synchronous on purpose (mainline prefers async since v6.4).
-		 * On RK3308 boards whose SDIO bank runs at 1.8 V the io-domain
-		 * driver must see the fixed regulators at fs_initcall so it
-		 * sets the pad mode before dw_mmc attaches the card; with async
-		 * probe it defers and can land after the clock switch. See
-		 * docs/kernel-6.12-port.md, 4.2.
-		 */
-		.probe_type	= PROBE_FORCE_SYNCHRONOUS,
+		.probe_type	= PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = of_match_ptr(fixed_of_match),
 	},
 };
