@@ -41,6 +41,8 @@ static LIST_HEAD(regulator_ena_gpio_list);
 static LIST_HEAD(regulator_supply_alias_list);
 static LIST_HEAD(regulator_coupler_list);
 static LIST_HEAD(regulator_debug_list);
+/* Guards regulator_debug_list: regulators register from async probe workers. */
+static DEFINE_MUTEX(regulator_debug_list_mutex);
 static bool has_full_constraints;
 
 static struct dentry *debugfs_root;
@@ -5514,6 +5516,7 @@ static void rdev_deinit_debugfs(struct regulator_dev *rdev)
 
 	debugfs_remove_recursive(rdev->debugfs);
 
+	mutex_lock(&regulator_debug_list_mutex);
 	list_for_each_entry_safe(reg_debug, n, &regulator_debug_list, list) {
 		if (reg_debug->reg->rdev == rdev) {
 			reg_debug->reg->debugfs = NULL;
@@ -5522,6 +5525,7 @@ static void rdev_deinit_debugfs(struct regulator_dev *rdev)
 			kfree(reg_debug);
 		}
 	}
+	mutex_unlock(&regulator_debug_list_mutex);
 }
 
 static void rdev_init_debugfs(struct regulator_dev *rdev)
@@ -5567,7 +5571,9 @@ static void rdev_init_debugfs(struct regulator_dev *rdev)
 		return;
 	}
 	reg_debug->reg = regulator;
+	mutex_lock(&regulator_debug_list_mutex);
 	list_add(&reg_debug->list, &regulator_debug_list);
+	mutex_unlock(&regulator_debug_list_mutex);
 
 	ops = rdev->desc->ops;
 
