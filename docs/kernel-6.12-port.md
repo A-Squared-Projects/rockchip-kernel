@@ -684,23 +684,46 @@ The two halves are bisected separately:
   the port with the transaction pushed past 1.2 s) and the ones that
   fail differ in exactly the state cpufreq owns.
 
-  Two tests, one of them a read. Read, on 6.1, 6.6 and the port,
-  steady state after boot: the vdd_core regulator's `microvolts`,
-  `/sys/kernel/debug/pwm` for pwm0, the raw PWM0 registers at
-  0xff180000 (0x04 period, 0x08 duty, 0x0c ctrl), and cpufreq's
-  governor, current frequency, `stats/time_in_state` and
-  `stats/total_trans`; plus the `initcall_debug` timestamps of
-  `pwm-regulator`, `cpufreq-dt` and `rockchip-cpufreq` against the
-  SDIO attach, which the existing G captures already hold; plus the
-  dmesg lines with `volt-sel`, `pvtm`, `idc` or `leakage`. Any
-  difference in the steady voltage or the duty is the answer; if
-  those match, the transition timing is. The build:
-  `claude/exp-no-cpufreq`, the port with `CONFIG_CPU_FREQ` off, so the
-  CPU stays at the loader's frequency and voltage. Twelve boots at
-  6.1's rate says DVFS eats the margin, and the fix is then in the
-  OPP voltages or the transition timing for this board, not in SDIO.
-  At the bench: a meter on vdd_core on each kernel, and a scope on it
-  through the 0.9 to 1.3 s window on the port.
+  Correction from meta-rithum, accepted: the stable regulator-core
+  clamp commit (93b078e5942) cannot touch vdd_core. Without a
+  `voltage-table` the PWM regulator is continuous-range with no
+  `list_voltage`, so the block that commit moved never runs. It is
+  out.
+
+  Read on 6.6 at steady state (525 s up): vdd_core 950120 uV, pwm0
+  period 5000 ns, duty 1200 ns, inverted (24 percent: 827000 +
+  0.24 x 513000 = 950120, so duty and voltage agree); governor
+  interactive at 408 MHz, 158 transitions, almost all time at
+  408 MHz; `pvtm-volt-sel=4` at 0.913 s (so 816 MHz runs at 975 mV,
+  1008 at the L4 value). The rail is not at the DT's 1015 mV init
+  value once cpufreq has settled; it sits at the 950 mV floor. On 6.6
+  the SDIO attach at 0.76 s precedes the PVTM read at 0.91 s and
+  therefore any cpufreq activity: the switch ran at the loader's core
+  voltage. Raw PWM registers cannot be read with devmem (the driver
+  gates pclk when idle and the block reads back 0x13 everywhere);
+  debugfs is the source.
+
+  The refined statement: the SDIO clock switch fails when the core
+  rail has already dropped to its floor and passes when it has not.
+  That fits every result: 6.6 passes with the attach before cpufreq
+  starts; the port's one clean pass at 0.917 s against a fail at
+  0.939 s on the same image is a 22 ms window in which the first
+  governor step down would land; A and C pass on attempts after
+  about 1.25 s, when init is starting and the governor is back up;
+  6.1 attaches at 1.01 s, and its cpufreq driver initialised from
+  `module_init` where the port's registers a platform device with an
+  early init, so its first step down is later. The remaining reads
+  decide: on 6.1 and the port, the `initcall_debug` timestamps of
+  `rockchip-cpufreq` and `cpufreq-dt` against the attach (the
+  existing G captures hold them), and the same steady-state regulator,
+  pwm and cpufreq reads as above. Then `claude/exp-no-cpufreq`
+  (b18a364c1f3): twelve boots at 6.1's rate says the rail is the
+  mechanism, and the product fix is a voltage floor for this board's
+  low OPPs (Rockchip already keeps 1.0 V below 0 C via
+  `rockchip,low-temp-min-volt`, so the pattern exists) or SDIO I/O
+  margin at 950 mV, not anything in the SDIO driver. At the bench: a
+  scope on vdd_core through 0.85 to 1.3 s on the port, triggered on
+  the SDIO clock switch.
 
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
