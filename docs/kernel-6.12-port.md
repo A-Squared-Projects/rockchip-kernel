@@ -608,7 +608,8 @@ The two halves are bisected separately:
   0.760 s, "new high speed SDIO card" at 0.762 s, wlan0 with the chip's
   own MAC. One boot, not a rate, but on a kernel 95k commits after
   6.1 and 113k before the pre-merge tree, a first-attempt attach
-  points the larger loss of margin at the 6.6-to-6.12.69 half. The
+  points the larger loss of margin at the 6.6-to-6.12.69 half (this did
+  not survive: the twelve-boot anchor below came back 8 of 12). The
   attach sits at 0.76 s here against 1.07 s on the port; the whole
   boot is earlier. The twelve boots waited on a second blocker, now understood:
   vendor storage returned nothing, so `vendor-serial` was empty, S23
@@ -645,7 +646,8 @@ The two halves are bisected separately:
   not twelve (p about 0.07 under the pre-merge rate), and the attach
   sits at 0.76 s against 1.07 s on the port, but it moves the primary
   loss of margin into the 6.6-to-6.12.69 half, 113k commits, and out
-  of anything inherited from before 6.6. The sixth boot stranded on
+  of anything inherited from before 6.6 (superseded: pooled 6.6 is
+  16 of 20, one band with 6.12.69). The sixth boot stranded on
   the vendor-storage fault above (the layer's serial fallback handled
   an empty read, not a hung one); the blob fix at 02e174bf1be removes
   the fault itself.
@@ -768,14 +770,13 @@ The two halves are bisected separately:
   clear. The table:
 
       6.1.188                          12 of 12
-      6.6.89                           8 of 8
+      6.6.89                           8 of 8, then 8 of 12 (16 of 20)
       6.12.69 pre-merge, plain         7 of 12
       6.12.69 pre-merge + rithum stack 10 of 12
       6.12.111 port                    1 of 6 (needs twelve)
 
-  The 6.12.69-to-6.12.111 stable span is now the dominant step, if the
-  port's rate holds at twelve boots; if the port is nearer 4 of 12 the
-  6.6-to-6.12.69 half deserves the builds instead. Two candidates that
+  The 6.12.69-to-6.12.111 stable span is the only established step
+  (below). Two candidates that
   looked good on rate ordering are excluded at source level: the
   regulator-core clamp (above) and the dw_mmc internal-phase change
   (rk3308 binds as rk3288 and keeps `clk_set_phase`). Two more that
@@ -798,8 +799,9 @@ The two halves are bisected separately:
   08bc7102c28) with dw_mmc alone put back on the tasklet; the other
   twelve hosts the commit touched are left as they are, and the stable
   span does not touch dw_mmc.c or dw_mmc.h so the change reads the same
-  on either base. It is expected to reach sshd and is the only build
-  prepared for the 6.6-to-6.12.69 half.
+  on either base. It is expected to reach sshd and was the only build
+  prepared for the 6.6-to-6.12.69 half; it is moot now (below) and
+  stays pushed unrun.
 
   Why the two single-commit reverts sit on different bases (meta-rithum
   caught the first cut of this one, based on the port, before it cost a
@@ -851,33 +853,60 @@ The two halves are bisected separately:
   bootargs-only confirmations (`cpufreq.off=1`,
   `cpufreq.default_governor=performance`) are no longer needed.
 
-  **The 6.6 anchor is not established.** The table's two drops are not
-  equally supported. 6.1 against 6.12.69 (12 of 12 against 17 of 24) is
-  p about 0.03; 6.12.69 against the port (17 of 24 against 1 of 6) is p
-  about 0.015; both hold. But 6.6's 8 of 8 against 6.12.69's 17 of 24
-  is p about 0.14, so "6.6 to 6.12.69 is the primary regression" rests
-  on eight boots. Four more 6.6 boots cost nothing but device time and
-  decide whether there are two drops (6.6 really near 8 of 8, and the
-  BH conversion matters) or one (6.6 near 71 percent, everything before
-  6.12.69 is noise and only the stable window is real). They go
-  wherever they fit between flashes.
+  **The 6.6 anchor came back 8 of 12** (ff18b4898c2 as 6.6.89, gated,
+  vendor storage confirmed working first, same bimodal signature, no
+  underflows). That was the question the two-drops model rested on, and
+  the answer is no. Pooled 6.6 is 16 of 20; against 6.12.69's 17 of 24
+  that is p about 0.5, and the two 6.6 runs are consistent with each
+  other (p about 0.11), so pooling is fair. The first 8 of 8 was the
+  tail: at 71 percent, eight passes in a row happen about 6 percent of
+  the time. There is no 6.6-to-6.12.69 regression. Everything from 6.6
+  to 6.12.69 is one band that nothing separates, and the only
+  established drop is 6.12.69 to 6.12.111, p about 0.015, inside the
+  43 stable tags.
+
+  Retired by that: the whole 6.6-to-6.12.69 line, `921c87ba3893` and
+  `a8f254854858` as anything but already excluded, and the two
+  independent drops model. `claude/exp-revert-mmc-bh` (7d09ea1c43d)
+  stays pushed as built but is not to be run; the earlier instinct to
+  exclude those two commits was right in effect and wrong in reason.
+  Two method notes from the episode. An eight-boot anchor is not an
+  anchor; twelve is the floor for any rate that a decision rests on.
+  And `merge-base --is-ancestor` is the wrong instrument for a revert
+  branch: `git revert` leaves the original in history, so ancestry says
+  `88e338bd9b6` is present on `exp-revert-probe-ready`. Content is the
+  check, and by content that branch is core.c -15, dd.c -20,
+  device.h -45 against the port and nothing else.
+
+  **"6.1 is clean" is a twelve-boot claim** and it is not established
+  either: 12 of 12 against 6.6's 16 of 20 is p about 0.12. 6.1 does
+  look different in kind (twelve boots with zero -110 anywhere, against
+  sixteen on 6.6), but if 6.1 is really nearer 85 percent this is not a
+  6.12 regression at all; it is a marginal fault every kernel on this
+  board has, which something in the stable window made much worse.
+  That changes what a successful probe-ready revert means: restoring
+  the port to about 75 percent is "back to the band", not "fixed", and
+  the remaining margin is the bench's. If 6.1 really is at 100 percent
+  there are two drops after all, but the first is 6.1 to 6.6, a
+  different window (five mainline releases plus the vendor base
+  change) that has not been looked at. Twelve more 6.1 boots decide
+  which; the image is banked and it is boots, not a build.
 
   Vehicles built and banked by meta-rithum, independent of the deploy
   directory, so any of them can start without a build: 6.1.188
   (12 of 12), 6.12.69 pre-merge + rithum, 6.12.111 CPU_FREQ off, and
   the port itself (ready for its twelve boots and the reads). Unit 0002
-  was to go to Alex for a vendor-devkey provisioning test; that is
-  deferred and the unit stays on the loop. The 6.6 anchor at ff18b4898c2
-  is flashing now, gated, with vendor-storage check and OPP reads before
-  its boots.
+  is free; the vendor-devkey test is deferred.
 
-  Run order: the port's twelve boots (with the reads riding along: OPP
-  debugfs `u_volt_target`, vdd_core, pwm0 duty, cpufreq state, dmesg
-  `volt-sel`/`pvtm`/`idc`, and the pwrseq probe timestamps that give
-  the reset-pulse length), four more 6.6 boots when convenient, then
-  `exp-revert-probe-ready`, then `.90` if the revert does not move the
-  rate, then `exp-revert-mmc-bh` on its 6.12.69 base only if the extra 6.6 boots keep the
-  first drop alive.
+  Run order: the port's twelve boots first, because the port is the
+  baseline the probe-ready revert is measured against and 1 of 6 is
+  not a rate (the reads ride along: OPP debugfs `u_volt_target`,
+  vdd_core, pwm0 duty, cpufreq state, dmesg `volt-sel`/`pvtm`/`idc`,
+  and the pwrseq probe timestamps that give the reset-pulse length);
+  then `exp-revert-probe-ready`; then twelve more 6.1 boots to settle
+  whether 6.1 is at 100 percent or in the band; then `.90` if the
+  revert does not move the rate. The unit is free and held for this;
+  the devkey test is deferred.
 
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
@@ -1184,17 +1213,17 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   underflow` across the reboot loop; design the cookie capture the 6.1
   comment asks for.
 - WiFi SDIO is intermittent on 6.12 (4.2): 6.1 passes 12 of 12 on the
-  same unit, 6.6 8 of 8, 6.12.69 17 of 24, the port 1 of 6. Everything
-  readable on the SoC side is identical between the kernels; DVFS,
-  bus rate, timing mode and sample phase are excluded. The
-  6.12.69-to-6.12.111 stable span is the established step (single
-  commit test `exp-revert-probe-ready`, midpoint `.90`); the
-  6.6-to-6.12.69 half needs four more 6.6 boots before it counts
-  (single-commit test `exp-revert-mmc-bh` ready, on the 6.12.69 base). The bench (scope on
-  WL_REG_ON, CLK, CMD and the module's rails across the clock switch;
-  real power cycles) is next if the software bisection does not
-  land. The delay variants A and C are not fixes. This blocks calling
-  the port done.
+  same unit, 6.6 16 of 20, 6.12.69 17 of 24, the port 1 of 6.
+  Everything readable on the SoC side is identical between the
+  kernels; DVFS, bus rate, timing mode and sample phase are excluded,
+  and 6.6 to 6.12.69 is one band. The 6.12.69-to-6.12.111 stable span
+  is the only established step (single-commit test
+  `exp-revert-probe-ready`, midpoint `.90`). Whether 6.1 is truly clean
+  or at the top of the band needs twelve more 6.1 boots. The bench
+  (scope on WL_REG_ON, CLK, CMD and the module's rails across the clock
+  switch; real power cycles) is next if the software bisection does
+  not land. The delay variants A and C are not fixes. This blocks
+  calling the port done.
 - The RS variant shares every fix here and has not been booted.
 - Branch naming: this is `claude/kernel-6-12-port-kg1g39`; it wants a
   `rithum-6.12` home.
