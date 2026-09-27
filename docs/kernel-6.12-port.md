@@ -1407,7 +1407,31 @@ The two halves are bisected separately:
      ship is Alex's call, and the DT line stands on its own as the
      correct hardware description either way.
 
-     The root fix is in the bootloader and is staged, not first. The
+     Which of these is "the fix" (Alex's question): the kernel one.
+     The kernel already owns pad-voltage configuration through the DT:
+     the `io_domains` node declares every bank's supply, the driver
+     reads each supply's voltage and writes the mode, and that is
+     correct on every boot of every kernel. The loader's 3.3 V is a
+     conservative default for a SoC whose boards may wire VCCIO4
+     either way, not configuration; the kernel is expected to override
+     it from the DT, and does. The defect was only that one consumer of
+     the bank, the SDIO host, did not wait for that write. So the
+     shape of the fix is the DT dependency (`vqmmc-supply`), and the
+     bootloader change below is hardening against a slow io-domain,
+     not the fix. A DT-only variant is cut for measurement:
+     `claude/fix-sdio-vqmmc-only`, the port plus the one DT line and no
+     driver change. The ordering it relies on is favourable in practice
+     (when the regulator binds, the deferred-probe work releases both
+     consumers in list order; the io-domain is synchronous and takes
+     microseconds, dw_mmc is async and takes hundreds of milliseconds
+     before the switch) but not guaranteed by anything in the core,
+     which is why the branch on the port also carries the synchronous
+     `regulator-fixed` line. Twelve boots on the DT-only vehicle say
+     whether the guarantee is needed in practice; if it is 12 of 12,
+     the driver line can be dropped and the port fix becomes one DT
+     property, which is the version that would also be right upstream.
+
+     The bootloader change is hardening, staged, not first. The
      write in U-Boot's TPL that selects 3.3 V for VCCIO4 is the
      documented intent (protection against chip damage on boards that
      supply 3.3 V there), but TPL never runs on these units: the
