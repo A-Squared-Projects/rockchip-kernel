@@ -789,6 +789,23 @@ The two halves are bisected separately:
   would hide a margin that a cold boot or another card lot could
   reopen.
 
+  Reading the span for what could move boot ordering or latency on
+  this board gives about 110 commits in driver core, workqueue,
+  scheduler, timers, ARM mm, DMA, OF, clk, gpio, pinctrl, regulator
+  and mmc core. Two stand out and are not excluded by anything read so
+  far: `88e338bd9b6` "driver core: Don't let a device probe until it's
+  ready" (first in v6.12.86, so the .90 point contains it and the .80
+  point does not), which changes when devices may probe and is the
+  kind of change that would move the port's mmc probe 50 ms later than
+  6.1's, and the deferred-probe timeout trio (`67c79e1cdbf`,
+  `d25dadf7423`, `962eae1f30e`). `552b9077733` (mmc fixed driver type)
+  touches only the eMMC path and is out. A single-commit test is
+  prepared alongside the tag bisection: `claude/exp-revert-probe-ready`
+  is the port with `88e338bd9b6` reverted, one commit, byte-identical
+  otherwise. If the port's twelve boots hold at its rate, .90 decides
+  which side of v6.12.86 the fault sits, and the revert build decides
+  whether that commit alone carries it.
+
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
   unit until it has booted somewhere: a boot on the layer's QEMU
