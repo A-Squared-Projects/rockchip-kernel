@@ -141,6 +141,18 @@ defconfig commit lists the remaining diffs, all upstream churn with the
 same effect. Method: resolve both defconfigs fully and diff the
 `.config`s, not the defconfigs.
 
+**savedefconfig drops what is default on the source kernel, and a
+different kernel may not default it.** The 6.1 defconfig named
+`CONFIG_HW_RANDOM_ROCKCHIP=y`; the 6.12 canonicalisation dropped the
+line because 6.12 defaults it on with `HW_RANDOM`, and the 6.6
+bisection image built from the same file came up without the hardware
+RNG, because 6.6 does not default it. Nothing in the build says so.
+The check that catches this class is to resolve the config on both
+kernels and compare every symbol that exists in both Kconfig trees
+(28 such differences between the 6.12 port and the 6.6 image, two of
+them real: `HW_RANDOM_ROCKCHIP` and `PHYLIB`). Options that userspace
+depends on are listed explicitly in the defconfig from now on.
+
 ### 3.4 Warnings
 
 GCC 16.2 builds the whole tree, modules and DTBs with zero warnings under
@@ -567,6 +579,26 @@ The two halves are bisected separately:
   6.6 driver does not need. A WiFi rate on it is therefore
   commensurable with the three points above. No display on this
   image: the panel bit-bang path is not carried.
+
+  **fbd75edae26 stranded unit 0002.** It boots, brings up eth0 and
+  DHCP, and opens no port; ssh is the only way in and flashing needs
+  ssh, so recovery is the bench (maskrom or the serial console). The
+  cause is not known from outside. One real omission was found from
+  the resolved config: the image had no Rockchip hardware RNG driver
+  (the 6.12 canonicalisation dropped a line 6.6 needs, see 3.3),
+  which is fixed on the branch. Whether that is the cause depends on
+  what blocked at S50; meta-rithum's candidate is that dropbear's
+  host key is TEE-derived and the OP-TEE client path does not come up
+  on the 6.6 base. The console will say: `optee` probe lines, `crng
+  init done`, and what state the key agent and dropbear are in. Do
+  not flash this branch to any unit until that is answered.
+
+  Every branch now states whether it is expected to reach sshd. The
+  6.12-based points (`bisect-pre-merge-6.12.69`, `.80`, `.90`, `.100`,
+  `pre-merge-plus-rithum`) are the port's own config and drivers with
+  only the stable span varied, and the pre-merge tree reached sshd on
+  twelve boots, so they are expected to. `bisect-6.6` is not, until
+  the bench says why.
 
 Until that is done, the port ships without WiFi being reliable, or it
 does not ship. A and C are not acceptable substitutes: they relocate
