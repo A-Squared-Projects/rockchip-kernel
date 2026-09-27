@@ -208,6 +208,14 @@ rk3308.dtsi lacks it too; only the RK35xx trees have it, which is exactly
 why those were the SoCs that did not regress. This is worth sending
 upstream.
 
+It is not needed on rithum-6.1. That driver sets the chip base to the
+bank's pinctrl pin base unconditionally and its fallback range
+registration passes the same value, so pinctrl gets the right numbers
+without the property. Adding it there is harmless and functionally a
+no-op (the GPIO core registers the range from the DT and the driver
+skips its fallback); it is insurance against a backport of the base
+change, not a fix, and belongs with the upstream submission.
+
 ### 4.2 WiFi SDIO timeouts: open, intermittent, and not the pin bug
 
 **Status: open.** An earlier version of this section said the
@@ -973,11 +981,54 @@ The two halves are bisected separately:
   next; 5 or 6 is ambiguous at this sample and needs another twelve.
   Then the twelve 6.1 boots.
 
-  Run order: the port's twelve boots and reads are done (above; the
-  pwrseq probe timestamps for the reset-pulse length are still to be
-  pulled from the captures); `exp-revert-probe-ready` is running; then twelve more 6.1 boots to settle
-  whether 6.1 is at 100 percent or in the band; then `.90` if the
-  revert does not move the rate. Both 6.12.111 images report the same kernel version, so only the
+  **`exp-revert-probe-ready`: 2 of 12, 40 errors**, identical to the
+  port's 2 of 12 and 40 errors (44ffdd03b68a as 6.12.111, gate
+  confirmed on VERSION_ID). Not a shift of any size; by the rule fixed
+  beforehand `88e338bd9b6` is not the cause and `.90` is next.
+
+  **The "port probes 50 ms later" observation did not survive twelve
+  samples** (meta-rithum's correction of their own two-boot comparison,
+  which was half the motivation for that revert). Time of the 50 MHz
+  switch, twelve boots per kernel:
+
+      6.1.188        mean 0.924 s  range 0.894-1.020  (spread 125 ms)
+      6.6.89         mean 0.656 s  range 0.607-0.743  (spread 136 ms)
+      6.12.69        mean 0.975 s  range 0.952-1.124  (spread 172 ms)
+      6.12.111 port  mean 0.963 s  range 0.935-1.068  (spread 132 ms)
+
+  6.1 and the port differ by 39 ms in the mean with overlapping ranges
+  against a within-kernel spread three times that, and 6.6 probes
+  300 ms earlier than either at 76 percent. Absolute probe position
+  does not order with the rate at all.
+
+  The nearest the captures come to the reset pulse is "allocated
+  mmc-pwrseq" to the first 400 kHz window:
+
+      6.1.188        mean 13.2 ms  range 5.6-19.1
+      6.6.89         mean  9.6 ms  range 4.0-14.2
+      6.12.69        mean  9.2 ms  range 2.3-13.8
+      6.12.111 port  mean  9.0 ms  range 5.3-14.9
+
+  6.1 gives the card about 4 ms more before the first clock, which is
+  the right direction given the delay arms, but 6.6 is within noise of
+  the port with five times its rate, so it is a weak negative, not a
+  lead. Within a kernel the window does not separate pass from fail:
+  6.6 passed at 4.0 ms and failed at 10.5 ms; the port passed and
+  failed at 7.8 ms each. This is not the reset-pulse length:
+  `mmc_pwrseq_simple` asserts in `pre_power_on` and releases in
+  `post_power_on` and neither prints, so the pulse is in no capture.
+  Getting it needs a print either side of the gpio call or the scope on
+  the reset line, which is one hook-up on the bench that already needs
+  a scope on the module's rails. Whatever decides the outcome is not
+  visible in the timestamps, which is consistent with everything else
+  this fault has done.
+
+  Run order now: the twelve 6.1 boots are running (gated on 6.1.188
+  and its vehicle) and settle which of the two readings above applies;
+  then `claude/bisect-6.12.90` (818307b7b44), already pushed, splits
+  the stable window; then `.80` or `.100` by its result. The reset
+  pulse itself is not in any capture (above) and waits on the bench.
+  Both 6.12.111 images report the same kernel version, so only the
   VERSION_ID stamp separates them; every flash gates on it.
 
   Two rules from this. Every branch states whether it is expected to
@@ -1296,7 +1347,7 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   kernels; DVFS, bus rate, timing mode and sample phase are excluded,
   and 6.6 to 6.12.69 is one band. The 6.12.69-to-6.12.111 stable span
   is the only established step (single-commit test
-  `exp-revert-probe-ready`, midpoint `.90`). Whether 6.1 is truly clean
+  `exp-revert-probe-ready` negative; midpoint `.90` next). Whether 6.1 is truly clean
   or at the top of the band needs twelve more 6.1 boots. The bench
   (scope on WL_REG_ON, CLK, CMD and the module's rails across the clock
   switch; real power cycles) is next if the software bisection does
