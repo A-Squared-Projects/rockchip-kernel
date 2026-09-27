@@ -34,6 +34,24 @@
 #include "rkflash_debug.h"
 #include "rk_sftl.h"
 
+#include <linux/uaccess.h>
+/* The SFTL blob reaches user memory through these. A bl straight from the .S
+ * to arm_copy_{from,to}_user skips the uaccess domain window, so the copy
+ * takes a page domain fault under CONFIG_CPU_SW_DOMAIN_PAN - going through C
+ * gets the bracket the running kernel expects. Same reason sftl_printk lives
+ * here: things the blob needs from C belong on this side. */
+unsigned long ftl_copy_from_user(void *to, const void __user *from,
+				 unsigned long n)
+{
+	return copy_from_user(to, from, n);
+}
+
+unsigned long ftl_copy_to_user(void __user *to, const void *from,
+			       unsigned long n)
+{
+	return copy_to_user(to, from, n);
+}
+
 void __printf(1, 2) sftl_printk(char *fmt, ...)
 {
 	va_list ap;
