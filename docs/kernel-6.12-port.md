@@ -610,19 +610,32 @@ The two halves are bisected separately:
   6.1 and 113k before the pre-merge tree, a first-attempt attach
   points the larger loss of margin at the 6.6-to-6.12.69 half. The
   attach sits at 0.76 s here against 1.07 s on the port; the whole
-  boot is earlier. The twelve boots wait on a new blocker: vendor
-  storage. The console shows "flash vendor storage:20170308 ret = -1",
-  which is noise (that driver only serves SFC NOR and prints -1 on
-  every SFC NAND kernel, 6.12 included); the line that matters is
-  "rkflashd vendor storage init ok/failed" from the SFTL path, not yet
-  read. Downstream, `vendor-serial` returns nothing, so S23 halts the
-  boot before ssh, the device key is not found, and the RTL8152 gets
-  no MAC. The kernel side of that path (rkflash, SFTL blob, sfc,
-  rk_vendor_storage) is now identical to the port's apart from the
-  block API, after carrying the SFC unaligned-access check (5d36ec40bf0)
-  that develop-6.6 predates; the 8250 LSR diagnostic drop is carried
-  too so the console is readable. Branch tip 45d48c1150a, rebuilt,
-  not yet rebooted.
+  boot is earlier. The twelve boots waited on a second blocker, now understood:
+  vendor storage returned nothing, so `vendor-serial` was empty, S23
+  parked the boot before ssh, the device key was not found and the
+  RTL8152 got no MAC. The "flash vendor storage:20170308 ret = -1"
+  console line is noise (that driver serves SFC NOR only and prints -1
+  on every SFC NAND kernel, 6.12 included). The cause is in the SFTL
+  blob: it creates `/dev/vendor_storage` from a static
+  `struct file_operations` with the ioctl handler at byte offset 40
+  and a copy at 44, which is where `unlocked_ioctl` and `compat_ioctl`
+  sat in the kernel the blob was built against. 6.6 removed the
+  `iterate` slot, so on 6.6 those fields are at 36 and 40: the blob's
+  handler lands on `compat_ioctl`, `unlocked_ioctl` stays NULL, and
+  every ioctl on the device returns ENOTTY while the SFTL init itself
+  reports success. **6.12 works by coincidence**: it added a 4-byte
+  `fop_flags` before `llseek`, which puts `unlocked_ioctl` back at 40.
+  Fixed on the 6.6 branch by shifting the two blob tables one word
+  (02e174bf1be, relocations verified at 0x24 and 0x28 in the object),
+  and pinned on both branches with `static_assert`s on the two offsets
+  in `rkflash_blk.c` (9adeb81c34c on the port), so the next layout
+  change fails the build instead of the device. The kernel side of the
+  vendor path is otherwise identical to the port's after carrying the
+  SFC unaligned-access check (5d36ec40bf0) that develop-6.6 predates;
+  the 8250 LSR diagnostic drop is carried too so the console is
+  readable. The 6.6 branch is rebuilt at 02e174bf1be and, per the
+  rule below, its next boot is console-attended: expected to reach
+  sshd, not yet shown to.
 
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
