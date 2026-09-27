@@ -810,6 +810,7 @@ The two halves are bisected separately:
       6.6.89                           5 of 5, then 8 of 12 (13 of 17)
       6.12.69 pre-merge, plain         7 of 12
       6.12.69 pre-merge + rithum stack 10 of 12
+      6.12.90 (pre-merge + v6.12.90)   8 of 12
       6.12.111 port                    2 of 12
 
   The 6.12.69-to-6.12.111 stable span is the only established step
@@ -1156,13 +1157,72 @@ The two halves are bisected separately:
   - The bench never saw a rail fault on the module: the rails are
     fine, the SoC pads are misconfigured.
 
-  Open in the mechanism: the loader's value of SOC_CON0 bit 4 (if the
-  loader already sets 1.8 V mode for vccio4 the pad-mode form is dead
-  and the io-domain ordering must act some other way), and whether
-  1.8 V signalling through a pad in 3.3 V mode fails in exactly this
-  fast-edge-only way. The first is one `io` read from a G-image shell
-  before the io-domain probe, or the loader source. Both are settled by
-  the tests below regardless.
+  **The loader question is answered, in favour of the pad-mode form.**
+  U-Boot for rk3308 (`arch/arm/mach-rockchip/rk3308/rk3308.c`, line
+  233 in rockchip-u-boot) deliberately writes VCCIO4 to 3.3 V mode:
+  `rk_clrsetreg(&grf->soc_con0, IOVSEL4_MASK, VCCIO4_3V3 <<
+  IOVSEL4_SHIFT)`, with the comment that the SoC resets to 1.8 V for
+  VCCIO4 but some boards supply 3.3 V, so it selects 3.3 V "as early as
+  possible" to protect those pads. This board supplies 1.8 V. The
+  kernel's io-domain driver is therefore the only writer that ever
+  corrects the SDIO bank to 1.8 V mode (steady-state SOC_CON0 0x194,
+  bit 4 set), and on a boot where it has not probed by the clock switch
+  the pads are in 3.3 V mode while the card signals at 1.8 V. 400 kHz
+  absorbs that; 50 MHz does not. Nothing else in the kernel writes that
+  bit (checked: only `io-domain.c`).
+
+  **Test 1, failing side confirmed, passing side not yet.** In the
+  port FAIL capture (meta-rithum):
+
+      1.094940  50 MHz switch
+      1.397660  probe of ff000000.grf:io-domains returned -517
+      1.398855  probe of vcc-1v8 returned 0 after 997 usecs
+
+  The io-domain was still deferring 303 ms after the switch and the
+  regulator it waits for completed 304 ms after it. That is the
+  prediction exactly. The passing side is not confirmed and must not be
+  recorded as if it were: the G captures are windowed (6.1 PASS
+  1.000-1.359 s, port PASS 1.051-1.392 s, port FAIL 1.051-1.399 s) and
+  neither passing capture contains an io-domains or vcc-1v8 line, which
+  means those probes ran before the window or after it, and port PASS
+  was cut six milliseconds short of where FAIL's defer line sits. The
+  capture script windows dmesg to 0.8-2.5 s; the G run for test 2 takes
+  the whole buffer and records the io-domains result and time per boot
+  against the outcome.
+
+  The mechanism adds one cheap confirmation to test 3: on a
+  sync-regulator boot the io-domain must never defer at all, so a
+  single G-instrumented boot of that image (io-domains returning 0 at
+  fs_initcall, no -517) is a confirmation rather than a correlation.
+
+  It also changes what the stable window means. The race exists from
+  6.4, so it is present at 6.6 (76 percent), .69 (71), .90 (67) and
+  .111 (17) alike; whatever is in v6.12.91 to v6.12.111 makes an
+  existing race lose far more often rather than creating it. The tag
+  commit is worth naming; the fix does not depend on it. And if test 3
+  holds, the 76 percent ceiling stated above and in section 9 goes
+  away, because both drops are one mechanism and 6.1 is 24 of 24
+  precisely because it predates the async change. That is a material
+  change to the bail-out decision and is not to be stated as fact until
+  test 3 lands.
+
+  Read on the remaining window, v6.12.91 to v6.12.111, for anything
+  that moves when a deferred probe is retried: the deferred-probe trio
+  (`67c79e1cdbf`, `d25dadf7423`, `962eae1f30e`) touches only the
+  10-second timeout work, not the retry, which is still
+  `driver_deferred_probe_trigger()` queueing `deferred_probe_work` on
+  the unbound workqueue after every successful probe; the
+  regulator-core locking fix (`3b7fffd7a89`) is an error path, and the
+  init-complete work move (`0d23d658d79`) is the 30-second job. None
+  of them is the timing shift; `.100` localises it, and the mechanism
+  test does not depend on which commit it is. The bootargs do not set
+  `fw_devlink`, so it is on by default: the driver core itself holds
+  the io-domain until the regulator devices it names have bound and
+  then re-probes it from the deferred work, while the sdio host, whose
+  only phandle dependency is the pwrseq, is held by nothing. How the
+  core let saradc reach the regulator lookup before its supplier had
+  registered on the failing boot is not explained yet; test 1 shows
+  it.
 
   Tests, in cost order:
 
@@ -1186,20 +1246,29 @@ The two halves are bisected separately:
      stays at 2 of 12, the ordering is not the mechanism and the
      -517 was coincidence.
 
-  If it holds, the shipping fix is not this experiment as written. The
-  principled options are: give the sdio host `vqmmc-supply =
-  <&vccio_sdio>` so it at least waits for the regulator (which orders
-  it after the regulator but not after the io-domain), make the
-  io-domain driver a hard dependency of the SDIO host, or keep
+  If it holds, the shipping fix is not this experiment as written, and
+  it is different in kind from A and C: it removes the race rather
+  than hiding the margin, and it survives whatever the tag-window
+  commit turns out to be. The options: give the sdio host
+  `vqmmc-supply = <&vccio_sdio>` so dw_mmc defers until that regulator
+  exists, which is the correct description of the hardware but is not
+  sufficient alone, because the io-domain and dw_mmc would then both
+  come off the deferred queue with no guaranteed order between them;
+  make the io-domain an explicit dependency of the SDIO host; or keep
   `regulator-fixed` synchronous in this tree with a comment naming this
-  board. The last is the smallest and matches what 6.1 does; it would
-  be a one-line vendor-tree patch rather than a DT change, and the
-  regulator debug-list lock (4.10) stays needed for the other async
-  regulator drivers.
+  board, which is the smallest change and exactly what 6.1 does. The
+  robust shipping version is the DT supply plus one of the other two.
+  The regulator debug-list lock (4.10) stays needed for the async
+  regulator drivers that remain.
 
-  Run order now: `.90` is at 5 of 6 with six to go, tracking the .69
-  band (the regression would then sit in .90 to .111); tests 1 and 2
-  above are zero-build and go ahead of any new tag branch; then
+  **`.90`: 8 of 12** (818307b7b44 as 6.12.90, gated), 16 errors, no
+  underflows: the same point as .69 (p about 1.0) and different from
+  the port (p about 0.019). The stable regression is in v6.12.91 to
+  v6.12.111, 21 tags; `.100` (8b433a4890f) splits it and is running.
+  The saradc test runs on the port afterwards, not on a bisection
+  point, because initcall_debug's printk load changes timing on a
+  timing-sensitive fault and the two questions must not share a
+  vehicle. Run order now: `.100`; then tests 1 and 2 above; then
   `exp-sync-fixed-regulator`; then `.80` or `.100` by its result. The reset
   pulse itself is not in any capture (above) and waits on the bench.
   Both 6.12.111 images report the same kernel version, so only the
