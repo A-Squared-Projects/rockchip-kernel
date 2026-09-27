@@ -1165,6 +1165,24 @@ The two halves are bisected separately:
   before the io-domain probe, or the loader source. Both are settled by
   the tests below regardless.
 
+  Read on the remaining window, v6.12.91 to v6.12.111, for anything
+  that moves when a deferred probe is retried: the deferred-probe trio
+  (`67c79e1cdbf`, `d25dadf7423`, `962eae1f30e`) touches only the
+  10-second timeout work, not the retry, which is still
+  `driver_deferred_probe_trigger()` queueing `deferred_probe_work` on
+  the unbound workqueue after every successful probe; the
+  regulator-core locking fix (`3b7fffd7a89`) is an error path, and the
+  init-complete work move (`0d23d658d79`) is the 30-second job. None
+  of them is the timing shift; `.100` localises it, and the mechanism
+  test does not depend on which commit it is. The bootargs do not set
+  `fw_devlink`, so it is on by default: the driver core itself holds
+  the io-domain until the regulator devices it names have bound and
+  then re-probes it from the deferred work, while the sdio host, whose
+  only phandle dependency is the pwrseq, is held by nothing. How the
+  core let saradc reach the regulator lookup before its supplier had
+  registered on the failing boot is not explained yet; test 1 shows
+  it.
+
   Tests, in cost order:
 
   1. Zero builds. In the three G captures, the timestamps of `probe of
