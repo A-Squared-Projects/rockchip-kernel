@@ -2,20 +2,22 @@
 
 What was learned bringing the RK3308 Rithum Switch kernel from the
 rithum-6.1 tree (Rockchip develop-6.1 plus upstream stable) onto Rockchip's
-develop-6.12, and what it cost. Written after the port booted and passed
-the same selftest as 6.1 on RithumSwitch-0002 (Switch Pro, RK3308 rev B
-silicon). Branch: `claude/kernel-6-12-port-kg1g39`, verified on hardware at
-49d61b7249d, based on develop-6.12 (470f9dccb, 6.12.69) with v6.12.111
-merged on top.
+develop-6.12, and what it cost. Written while the port was brought up and
+debugged on RithumSwitch-0002 (Switch Pro, RK3308 rev B silicon), and
+kept current through the WiFi investigation. Branch: `rithum-6.12`
+(developed as `claude/kernel-6-12-port-kg1g39`), based on develop-6.12
+(470f9dccb, 6.12.69) with v6.12.111 merged on top.
 
 The short version: the port is 32-bit ARM, Thumb-2, same rkflash/SFTL
-NAND stack, same boot image layout. Two faults are still open: a
-use-after-free between an exiting TEE client and the OP-TEE shutdown path
-(section 4.7, trigger removed at reboot) and
-intermittent WiFi SDIO initialisation (section 4.2). No AArch64 switch was ever needed.
-What it did need was an inventory of everything Rockchip left unported
-for RK3308 on 6.12, and a complete carry-over of our own history, which
-took two attempts.
+NAND stack, same boot image layout. It passes the same selftest as 6.1
+and, after the fix in 4.2, attaches WiFi 12 of 12 on warm reboots against
+6.1's 24 of 24. One fault is still open: a use-after-free between an
+exiting TEE client and the OP-TEE shutdown path (4.7, trigger removed at
+reboot). Cold boots have not been run on any kernel (7). No AArch64 switch
+was ever needed. What it did need was an inventory of everything Rockchip
+left unported for RK3308 on 6.12, a complete carry-over of our own
+history, which took two attempts, and one DT property nobody had noticed
+was missing because 6.1 never lost the race it covers.
 
 ## 1. What develop-6.12 is, and is not, for RK3308
 
@@ -1840,13 +1842,55 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   fix because two constants used by the serial path were declared
   inside that guard.
 - The RS variant shares every fix here and has not been booted.
-- Branch naming: this is `claude/kernel-6-12-port-kg1g39`; it wants a
-  `rithum-6.12` home. This document and the regulator fix also live on
-  `claude/port-findings`, branched from rithum-6.1, so they survive the
-  port branch (9).
+- Branches: the port is `rithum-6.12`; `claude/kernel-6-12-port-kg1g39`
+  is the same history and can go once nothing points at it. This
+  document and the regulator debug-list fix also live on
+  `claude/port-findings`, branched from rithum-6.1, for merging there.
+  The eleven diagnostic branches are deleted; their tips are all parents
+  of the content-free commit on `claude/archive-6.12-port-diagnostics`,
+  whose README lists them, so every hash in this document still
+  resolves (10).
 - Upstream candidates: `gpio-ranges` for rk3308.dtsi, `__NO_FORTIFY` in
   `atags_to_fdt.c`, the `uart4_rts_pin` label fix.
 - Unit 0002's microphone, independent of the kernel.
+
+## 8. Commit map (470f9dccb..HEAD, code only)
+
+    fd2b768965d  rkflash: port the block glue to the 6.12 block layer
+    051f93bf107  rkflash: reach user memory from the thumb SFTL blob through C
+    85f961a30f7  ARM: rk3308: reclaim RAM below OP-TEE via a fixed low ZRELADDR
+    3c346861215  Input: gt9xx - fix dangling input_dev->phys (garbage P: Phys)
+    6a4560ac5f0  ARM: dts: rockchip: carry the rithum-switch boards over from 6.1
+    fcf2915fb49  ARM: dts: rockchip: rk3308: point uart4 RTS bit-bang at the label that exists
+    2634f62e07e  rithum_linux_defconfig: carry over from 6.1, re-canonicalised for 6.12
+    f7ee4a0347b  clk: rockchip: rk3308: make rk3308_dump_cru static
+    2768495b95a  Merge tag 'v6.12.111'
+    b40b9a4b9f6  gpio: rockchip: convert bank->clk to devm_clk_get_enabled()
+    e16eaf90dd9  gpio: rockchip: change the GPIO version judgment logic
+    d03d42d565c  gpio: rockchip: teardown bugs and resource leaks
+    e7722fa482c  gpio: rockchip: fix generic IRQ chip leak on remove
+    2d0ceae0721  ARM: decompressor: keep FORTIFY_SOURCE out of atags_to_fdt.c
+    47227328c1f  gpio: rockchip: register the pin range by hardware pin base, not GPIO base
+    ea20c527a42  ASoC: codecs: rk3308: carry the vendor codec driver over from 6.1
+    4bcf324a148  arm64: dts: rockchip: rk3308: restore the vendor acodec node
+    c63830b0f5e  arm64: dts: rockchip: rk3308: describe the GPIO to pinctrl ranges
+    37ec8ecc376  serial: 8250: drop rockchip LSR break/frame-error diagnostic
+    27e267ccb8e  input: gt9xx: stop overwriting the panel's GT911 config
+    161e2f8fefc  rkflash: don't require FUNCTION_TRACER to link the ARM SFTL blobs
+    4b5252bac91  drm/panel: rithum: bit-bang the ST7701 SPI init over GPIOs
+    49d61b7249d  docs: record what the 6.12 port found
+    6bb9fb82405  drm/rockchip: fbdev: give /dev/fb0 back its read and write file operations
+    92cabc42992  optee: bound the shutdown wait for secure world to release its shm cache
+    720d6ab66d9  optee: leave the shm cache alone on reboot; only kexec needs it handed back
+    487b21b62cc  gt9xx: the GT911 restore needs a higher version byte (config header)
+    9adeb81c34c  rkflash: pin the file_operations layout the SFTL blobs bake in
+    8a97f566878  regulator: core: lock the vendor debug list; async probes corrupt it
+    d1cb5802600  mmc/regulator: order the SDIO attach after the io-domain sets the 1.8 V pad mode
+    60741904876  regulator: fixed: restore asynchronous probe; the DT dependency alone orders the SDIO attach
+
+The last two net to eight lines in the board DTS: `vqmmc-supply =
+<&vccio_sdio>` on the sdio node and its comment. The documentation
+commits between these are not listed; `git log -- docs` has them.
 
 ## 9. What survives if 6.12 is abandoned
 
@@ -1913,29 +1957,35 @@ Applies to any base newer than 6.1, whichever it is:
 - Upstream candidates (7): `gpio-ranges` for rk3308.dtsi, `__NO_FORTIFY`
   in `atags_to_fdt.c`, the `uart4_rts_pin` label.
 
-## 8. Commit map (470f9dccb..HEAD)
+## 10. Branch ledger
 
-    fd2b768965d  rkflash: port the block glue to the 6.12 block layer
-    051f93bf107  rkflash: reach user memory from the thumb SFTL blob through C
-    85f961a30f7  ARM: rk3308: reclaim RAM below OP-TEE via a fixed low ZRELADDR
-    3c346861215  Input: gt9xx - fix dangling input_dev->phys (garbage P: Phys)
-    6a4560ac5f0  ARM: dts: rockchip: carry the rithum-switch boards over from 6.1
-    fcf2915fb49  ARM: dts: rockchip: rk3308: point uart4 RTS bit-bang at the label that exists
-    2634f62e07e  rithum_linux_defconfig: carry over from 6.1, re-canonicalised for 6.12
-    f7ee4a0347b  clk: rockchip: rk3308: make rk3308_dump_cru static
-    2768495b95a  Merge tag 'v6.12.111'
-    b40b9a4b9f6  gpio: rockchip: convert bank->clk to devm_clk_get_enabled()
-    e16eaf90dd9  gpio: rockchip: change the GPIO version judgment logic
-    d03d42d565c  gpio: rockchip: teardown bugs and resource leaks
-    e7722fa482c  gpio: rockchip: fix generic IRQ chip leak on remove
-    2d0ceae0721  ARM: decompressor: keep FORTIFY_SOURCE out of atags_to_fdt.c
-    47227328c1f  gpio: rockchip: register the pin range by hardware pin base, not GPIO base
-    ea20c527a42  ASoC: codecs: rk3308: carry the vendor codec driver over from 6.1
-    4bcf324a148  arm64: dts: rockchip: rk3308: restore the vendor acodec node
-    c63830b0f5e  arm64: dts: rockchip: rk3308: describe the GPIO to pinctrl ranges
-    37ec8ecc376  serial: 8250: drop rockchip LSR break/frame-error diagnostic
-    27e267ccb8e  input: gt9xx: stop overwriting the panel's GT911 config
-    161e2f8fefc  rkflash: don't require FUNCTION_TRACER to link the ARM SFTL blobs
-    4b5252bac91  drm/panel: rithum: bit-bang the ST7701 SPI init over GPIOs
-    49d61b7249d  docs: record what the 6.12 port found
-    6bb9fb82405  drm/rockchip: fbdev: give /dev/fb0 back its read and write file operations
+Kept:
+
+- `rithum-6.12`: the port. `claude/kernel-6-12-port-kg1g39` is the
+  development branch with the same history.
+- `claude/bisect-6.6`: Rockchip develop-6.6 made bootable for this board
+  (queue fix, SFTL fops shift, regulator lock, RNG config, carry-overs),
+  13 of 17 on WiFi before the fix, the nearest fallback base if 6.12 is
+  ever dropped. Needs the same `vqmmc-supply` line.
+- `claude/port-findings`: this document and the regulator debug-list
+  fix on a rithum-6.1 base.
+- `claude/archive-6.12-port-diagnostics`: one content-free commit whose
+  parents are the eleven diagnostic tips below; its README repeats this
+  table.
+
+Deleted, reachable from the archive commit by hash:
+
+    a2c8bbcd0be  bisect-6.12.80            pre-merge + v6.12.80 + guard
+    818307b7b44  bisect-6.12.90            pre-merge + v6.12.90 + guard        8 of 12
+    8b433a4890f  bisect-6.12.100           pre-merge + v6.12.100 + guard       4 of 12
+    52b828114cc  bisect-pre-merge-6.12.69  develop-6.12 tip + carry-over        7 of 12
+    08bc7102c28  bisect-pre-merge-plus-rithum  + every post-merge rithum commit 10 of 12
+    b18a364c1f3  exp-no-cpufreq            port, CPU_FREQ off                   4 of 12
+    d9e24787603  exp-revert-probe-ready    port, 88e338bd9b6 reverted           2 of 12
+    7d09ea1c43d  exp-revert-mmc-bh         6.12.69 control, dw_mmc on tasklet   never run
+    d78c27ea1a2  exp-sync-fixed-regulator  port, regulator-fixed synchronous   12 of 12
+    e8c0e241870  fix-sdio-iodomain-order   port + vqmmc-supply + sync probe    12 of 12
+    bf7f3c2dbd9  fix-sdio-vqmmc-only       port + vqmmc-supply only            12 of 12
+
+None of the deleted trees is to ship; every one of them except the
+6.6 point lacks or predates the fix in 4.2.
