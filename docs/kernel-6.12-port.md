@@ -486,29 +486,56 @@ programme:
 3. Repeated real power cycles on each image. One cold boot of E passed
    first time, which at E's 1-in-6 warm rate is what chance gives once.
 
-Two software bisection points exist alongside the bench, and they are
-cheaper than a scope session, so they should be run first:
+Bisection, first point: the branch before the v6.12.111 stable merge
+(`f7ee4a0347b` plus `2d0ceae0721`, `161e2f8fefc`, `47227328c1f`,
+`c63830b0f5e`, pushed by meta-rithum as `claude/bisect-pre-merge-6.12.69`
+at 8fbd6a00c3d, verified as 6.12.69 on the device with pins working):
+7 of 12, every failure the same four-retry ladder at 50 MHz. Three
+ordered points on the same unit and loop:
 
-- The branch before the v6.12.111 stable merge. Every hardware boot so
-  far has been post-merge, so the merge (6.12.69 to 6.12.111, 238
-  files in the mmc, clk, soc, pinctrl, gpio, regulator, driver core,
-  scheduler, workqueue and ARM mm areas) has never been separated from
-  the port itself. A bootable pre-merge tree is `f7ee4a0347b` plus four
-  cherry-picks that apply cleanly in that order: `2d0ceae0721` (the
-  decompressor links with GCC), `161e2f8fefc` (the SFTL blobs link),
-  `47227328c1f` and `c63830b0f5e` (pins work, which WL_REG_ON needs).
-  Six boots. 6 of 6 puts the fault inside the stable merge and it can
-  be bisected commit by commit; 1 of 6 clears the merge and points at
-  develop-6.12 itself.
-- Rockchip's develop-6.6 (6.6.89). It carries the vendor rk3308 codec,
-  the aarch32 rk3308 boards, the pre-conversion gpio-rockchip, and the
-  same sdio node; rkflash there still uses `fmode_t` and
-  `blk_mq_init_queue`, so it needs a smaller version of the block port
-  than 6.12 did. Panel bit-bang and the GT911 config fix would need
-  carrying, but a WiFi-only test image does not need the display. If
-  pre-merge fails, a 6.6 boot splits the 6.1-to-6.12 span in half: a
-  pass there bounds the regression to 6.6-to-6.12 vendor development
-  and mainline changes, a fail bounds it to 6.1-to-6.6.
+    6.1.188                   6 of 6    no failure ever seen
+    6.12.69 pre-merge tree    7 of 12   five four-retry failures
+    6.12.111 port             1 of 6    five four-retry failures
+                              (pooled with B, D, E and the earlier
+                              gpio-ranges loops: 9 of 38)
+
+Against the port's pooled rate, 7 of 12 is better at p about 0.01;
+against 6.1's 6 of 6, it is worse at p about 0.04 (a twelve-boot 6.1
+run would firm that up). So the margin was lost in at least two steps:
+most of it between 6.1 and develop-6.12 at 6.12.69, and most of what
+remained inside the stable span. Same fault, different probability,
+which is what a margin eaten by unrelated changes looks like, and it
+says the search is for what perturbs a hardware margin, not for a
+misconfiguration.
+
+The two halves are bisected separately:
+
+- The stable span, by intermediate tags. Every one of the 43 tags is
+  an ancestor of v6.12.111, and the midpoint merge is prepared:
+  `v6.12.90` onto the pre-merge tree, thirteen conflicts, eleven of
+  them files stable never touched again after .90 (the .111 resolution
+  taken verbatim) and the two mmc hosts resolved by taking the .111
+  resolution and removing the one later stable commit each. It sits on
+  a local bisection branch awaiting permission to push. Twelve boots
+  per point; about six points to a single stable release, and the
+  candidates in that release are then readable. Stable commits in the
+  span that plausibly move boot timing or a margin, for when the range
+  narrows: the driver-core deferred-probe timeout trio (67c79e1cdbf,
+  d25dadf7423, 962eae1f30e, which change when fw_devlink relaxes
+  links; the port's first SDIO command sits 125 ms earlier in the boot
+  than the pre-merge tree's), workqueue and driver core moving to
+  `system_percpu_wq`, the regulator core's constraint clamp and
+  freezable init work, cpufreq core fixes, and the pinctrl-rockchip
+  pin-count reset on re-probe.
+- The 6.1 to develop-6.12 half, by Rockchip's develop-6.6 (6.6.89).
+  Its voice-module and mainboard dtsi are the same as 6.1's apart from
+  the gpiod property renames, and its rk3308.dtsi differs by two cache
+  properties, so a WiFi rate there is commensurable with the three
+  above. It needs a small block-glue port of rkflash (the vendor copy
+  there still has the pre-6.5 signatures), the rithum boards, the
+  defconfig, and the decompressor and SFTL link fixes; the codec and
+  the old gpio driver are already there, and a WiFi-only image needs
+  no display.
 
 Until that is done, the port ships without WiFi being reliable, or it
 does not ship. A and C are not acceptable substitutes: they relocate
