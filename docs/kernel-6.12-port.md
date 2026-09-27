@@ -760,6 +760,35 @@ The two halves are bisected separately:
   so far, so the post-merge rithum commits are not implicated. All of
   the above is warm reboots; cold boots may differ.
 
+  **Control result: `pre-merge-plus-rithum` 10 of 12**, strictly
+  bimodal (every failure exactly four errors, every pass zero), no
+  refcount underflows. Against plain pre-merge's 7 of 12 that is no
+  effect (p about 0.37), so the post-merge rithum commits, including
+  the four gpio-rockchip fixes that sit on the pwrseq reset path, are
+  clear. The table:
+
+      6.1.188                          12 of 12
+      6.6.89                           8 of 8
+      6.12.69 pre-merge, plain         7 of 12
+      6.12.69 pre-merge + rithum stack 10 of 12
+      6.12.111 port                    1 of 6 (needs twelve)
+
+  The 6.12.69-to-6.12.111 stable span is now the dominant step, if the
+  port's rate holds at twelve boots; if the port is nearer 4 of 12 the
+  6.6-to-6.12.69 half deserves the builds instead. Two candidates that
+  looked good on rate ordering are excluded at source level: the
+  regulator-core clamp (above) and the dw_mmc internal-phase change
+  (rk3308 binds as rk3288 and keeps `clk_set_phase`). Two more that
+  were raised are outside the span altogether: the rk3308 iomux route
+  update (a8f254854858) and the dw_mmc tasklet-to-BH-workqueue
+  conversion (921c87ba3893) are both mainline before 6.12.69 and both
+  already in rithum-6.1; the rk3308 and rk3308b route tables are
+  identical between 6.1 and the port. The stable midpoint
+  `claude/bisect-6.12.90` (818307b7b44) is built and waiting on the
+  port's twelve boots. A and C stay bounds, not a fix: a fixed delay
+  would hide a margin that a cold boot or another card lot could
+  reopen.
+
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
   unit until it has booted somewhere: a boot on the layer's QEMU
