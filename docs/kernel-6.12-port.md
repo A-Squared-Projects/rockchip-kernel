@@ -336,8 +336,12 @@ this branch, all found functionally identical:
   `rtc_32k`) and that clock enable.
 - `drivers/soc/rockchip/io-domain.c`: only the regulator lookup used
   for a `dev_info` line changed. vccio4 is `vcc_1v8`, a fixed regulator
-  probed at subsys_initcall, and the io-domain probes at fs_initcall,
-  before dw_mmc at device_initcall, on both trees.
+  registered at subsys_initcall, and the io-domain probes at
+  fs_initcall, before dw_mmc at device_initcall, on both trees. **This
+  exclusion was wrong**: it assumes the fixed regulator's probe runs
+  when its driver registers, which is true on 6.1 and false from v6.4,
+  where `regulator-fixed` probes asynchronously (259b93b21a9). See the
+  io-domain ordering hypothesis below.
 - `drivers/pinctrl/pinctrl-rockchip.c`: the 644-line delta is RV1103B
   and RK3572 support plus an input-enable hook no RK3308 path calls.
 - `drivers/gpio/gpio-rockchip.c`: the vendor pin-base change and the
@@ -363,8 +367,9 @@ a failed boot leaves the card in pwrseq reset through the reboot on
 either kernel; B boot 5 passed after four failed boots and boot 6
 failed after it, so the previous boot does not decide the next). On two
 B boots 22 ms apart with intervals matching to 1 ms, one passed and
-one failed: this looks like a genuine marginal condition, not an
-ordering race with another driver.
+one failed: this looked like a genuine marginal condition, not an
+ordering race with another driver (revised below: an ordering race
+with the io-domain driver is now the leading hypothesis).
 
 Physical state measured on the port (B image, unit 0002): SDIO_CON0
 0x2, CON1 0x0, GRF SOC_CON0 0x194 (bit 4 set, vccio4 at 1.8 V), GRF
@@ -1085,8 +1090,117 @@ The two halves are bisected separately:
   across the rate change) and no boot-time cost, but it is in the same
   class as A and C: it would hide the margin, not explain it.
 
-  Run order now: `claude/bisect-6.12.90` (818307b7b44) is running and
-  splits the stable window; then `.80` or `.100` by its result. The reset
+  **The first within-kernel discriminator, and a mechanism that fits
+  every result.** Filtering the three initcall_debug captures (the G
+  builds) for anything that could load a rail found no probe on the
+  newer kernels that 6.1 lacks (meta-rithum). It found this instead:
+
+      6.1  PASS   probe of ff1e0000.saradc returned 0    after 1313 usecs
+      port PASS   probe of ff1e0000.saradc returned 0    after 2902 usecs
+      port FAIL   probe of ff1e0000.saradc returned -517 after   11 usecs
+
+  -517 is `-EPROBE_DEFER`. On the failing boot saradc could not get its
+  `vref-supply`; on the passing boot of the same binary it could. It is
+  n=1 against n=1, but it is the first thing all session that differs
+  between a pass and a fail of one kernel. The DT makes it mean
+  something: `vref-supply = <&vcc_1v8>`, and `vcc_1v8` is the same
+  regulator node as `vccio_sdio`, the SDIO bank's IO-domain supply
+  (`vccio4-supply = <&vccio_sdio>`), with `vin-supply = <&vcc_io>`. A
+  boot on which saradc found that regulator unresolved is a boot on
+  which the io-domain driver, which needs the same regulators, deferred
+  too. The sdio host names no `vqmmc-supply` or `vmmc-supply`, so it
+  waits for nothing: it attaches on the pwrseq alone.
+
+  Why 6.1 never sees this and every newer base does: in v6.4-rc1,
+  259b93b21a9 ("regulator: Set PROBE_PREFER_ASYNCHRONOUS for drivers
+  that existed in 4.14") made `regulator-fixed` (and pwm-regulator and
+  gpio-regulator) probe on the async workqueue. It is absent from
+  rithum-6.1 and present from the 6.6 point on, by ancestry and by
+  content. On 6.1 the fixed regulators register synchronously inside
+  subsys_initcall, so when the io-domain driver probes at fs_initcall
+  its supplies exist, it reads their voltages and writes the pad modes
+  into GRF SOC_CON0 (vccio4 bit 4 set for 1.8 V) before dw_mmc's driver
+  is even registered. From 6.4 on, at fs_initcall the fixed regulators
+  may or may not have been probed yet; when not, the io-domain returns
+  -EPROBE_DEFER and is retried from the deferred-probe workqueue after
+  some later successful probe, at a time that varies boot to boot,
+  while the SDIO host runs its own async probe and attaches regardless.
+  This is also exactly the condition under which the vendor
+  `regulator_debug_list` corruption (4.10) was seen: concurrent
+  regulator probes did not exist before 6.4.
+
+  What that predicts, checked against everything recorded:
+
+  - The identification at 400 kHz passes and the first command after
+    the switch to a high-speed rate gets a hardware response timeout:
+    a 1.8 V bank whose pads are still in the loader's mode is a
+    signalling-margin fault that slow edges survive and fast ones do
+    not. Rate-independent above 400 kHz (B), phase-independent (D),
+    mode-independent (E): the response is never seen at all.
+  - Each retry power-cycles the card and fails identically: the pad
+    mode is unchanged until the io-domain probe lands, and the retries
+    are over within tens of milliseconds.
+  - The post-power-on delay arms (A, C) move the attach later and pass
+    dose-dependently: they push the switch past a varying io-domain
+    probe time.
+  - Every register read at steady state is identical between kernels,
+    SOC_CON0 0x194 included: by then the io-domain has probed.
+  - Timestamps of the attach do not separate pass from fail: the
+    variable is when the io-domain probe lands, which is not in any
+    capture that lacks initcall_debug.
+  - 6.1 is 24 of 24: no async regulator probe, no race. Every base
+    from 6.6 sits in a band: the race exists and its odds depend on
+    how the boot's probe timing falls; the stable window then shifts
+    that timing further (the driver-core probe-readiness change was
+    excluded alone, but the window holds many such changes).
+  - The bench never saw a rail fault on the module: the rails are
+    fine, the SoC pads are misconfigured.
+
+  Open in the mechanism: the loader's value of SOC_CON0 bit 4 (if the
+  loader already sets 1.8 V mode for vccio4 the pad-mode form is dead
+  and the io-domain ordering must act some other way), and whether
+  1.8 V signalling through a pad in 3.3 V mode fails in exactly this
+  fast-edge-only way. The first is one `io` read from a G-image shell
+  before the io-domain probe, or the loader source. Both are settled by
+  the tests below regardless.
+
+  Tests, in cost order:
+
+  1. Zero builds. In the three G captures, the timestamps of `probe of
+     vcc-io`, `probe of vcc-1v8`, `probe of ...io-domains` (with any
+     -517) against the 50 MHz switch. Prediction: io-domains returns 0
+     before the switch on 6.1 PASS and port PASS, and after it (or
+     -517 then late) on port FAIL.
+  2. One run, no build: twelve boots of the existing G-port image,
+     recording per boot the saradc return, the io-domains probe time
+     against the switch, and the SDIO outcome. Prediction: the
+     io-domains ordering tracks the outcome boot for boot.
+  3. One build, one run: `claude/exp-sync-fixed-regulator`
+     (d78c27ea1a2), the port with the `PROBE_PREFER_ASYNCHRONOUS` line
+     removed from `regulator-fixed` only, so the fixed regulators
+     register synchronously as on 6.1; pwm-regulator and gpio-regulator
+     keep async probe. Expected to reach sshd. Prediction if the
+     mechanism is right: the port's rate returns toward 24 of 24, which
+     would also mean the two drops are one mechanism at two severities
+     and the 76 percent ceiling above is lifted with it. If the rate
+     stays at 2 of 12, the ordering is not the mechanism and the
+     -517 was coincidence.
+
+  If it holds, the shipping fix is not this experiment as written. The
+  principled options are: give the sdio host `vqmmc-supply =
+  <&vccio_sdio>` so it at least waits for the regulator (which orders
+  it after the regulator but not after the io-domain), make the
+  io-domain driver a hard dependency of the SDIO host, or keep
+  `regulator-fixed` synchronous in this tree with a comment naming this
+  board. The last is the smallest and matches what 6.1 does; it would
+  be a one-line vendor-tree patch rather than a DT change, and the
+  regulator debug-list lock (4.10) stays needed for the other async
+  regulator drivers.
+
+  Run order now: `.90` is at 5 of 6 with six to go, tracking the .69
+  band (the regression would then sit in .90 to .111); tests 1 and 2
+  above are zero-build and go ahead of any new tag branch; then
+  `exp-sync-fixed-regulator`; then `.80` or `.100` by its result. The reset
   pulse itself is not in any capture (above) and waits on the bench.
   Both 6.12.111 images report the same kernel version, so only the
   VERSION_ID stamp separates them; every flash gates on it.
@@ -1407,7 +1521,10 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   kernels; DVFS, bus rate, timing mode and sample phase are excluded,
   and 6.6 to 6.12.69 is one band. The 6.12.69-to-6.12.111 stable span
   is the only established step (single-commit test
-  `exp-revert-probe-ready` negative; midpoint `.90` next). 6.1 is 24 of 24; every newer
+  `exp-revert-probe-ready` negative; midpoint `.90` running). Leading
+  hypothesis: io-domain pad mode set after the SDIO attach because
+  regulator-fixed probes asynchronously from v6.4 (4.2); test branch
+  `exp-sync-fixed-regulator`. 6.1 is 24 of 24; every newer
   base is at about 76 percent, so closing the stable window alone
   leaves that ceiling (9). The bench
   (scope on WL_REG_ON, CLK, CMD and the module's rails across the clock
@@ -1458,7 +1575,10 @@ Applies to rithum-6.1 today:
   and the 6.12 stable span from .69 to .111 drops that to 17. **The
   ceiling for any port on a vendor base newer than 6.1 is about 76
   percent per boot until the 6.1-to-6.6 difference is found**, and
-  that difference is not in drivers/mmc's SDIO path (read in full). A
+  that difference is not in drivers/mmc's SDIO path (read in full);
+  the leading candidate is the v6.4 asynchronous probe of
+  `regulator-fixed`, which lets the io-domain driver set the SDIO pad
+  mode after the attach (4.2). A
   decision to bail on 6.12 should weigh that a 6.6-based port carries
   the same ceiling.
 - Evidence rules (6) and the merge method for stable into a vendor
