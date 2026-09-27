@@ -275,6 +275,14 @@
 	max-frequency = <110000000>;
 	bus-width = <4>;
 	cap-sd-highspeed;
+	/*
+	 * The SDIO bank (VCCIO4) is supplied at 1.8 V and the loader hands
+	 * it over in 3.3 V pad mode; the io-domain driver corrects it once
+	 * this regulator has registered. Naming the supply here makes the
+	 * host wait for that regulator instead of attaching on the pwrseq
+	 * alone. See docs/kernel-6.12-port.md, 4.2.
+	 */
+	vqmmc-supply = <&vccio_sdio>;
 	no-sd;
 	no-mmc;
 	ignore-pm-notify;
