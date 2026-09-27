@@ -1324,6 +1324,12 @@ The two halves are bisected separately:
      written; one line, exactly what 6.1 does, not upstreamable as a
      fix for one board's convenience but acceptable in a vendor tree).
      Ship the DT supply plus one guarantee.
+     Prepared as `claude/fix-sdio-iodomain-order` (e8c0e241870): the
+     port plus `vqmmc-supply = <&vccio_sdio>` on the sdio node and
+     `PROBE_FORCE_SYNCHRONOUS` on `regulator-fixed`, both with comments
+     pointing here. Not tested on hardware; it runs only if the
+     mechanism test lands and must reproduce that image's rate before
+     it ships. Expected to reach sshd.
 
      The root fix is in U-Boot and is staged, not first. The write that
      hands the kernel VCCIO4 in 3.3 V mode is in TPL, the first stage,
