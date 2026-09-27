@@ -779,11 +779,25 @@ The two halves are bisected separately:
   looked good on rate ordering are excluded at source level: the
   regulator-core clamp (above) and the dw_mmc internal-phase change
   (rk3308 binds as rk3288 and keeps `clk_set_phase`). Two more that
-  were raised are outside the span altogether: the rk3308 iomux route
-  update (a8f254854858) and the dw_mmc tasklet-to-BH-workqueue
-  conversion (921c87ba3893) are both mainline before 6.12.69 and both
-  already in rithum-6.1; the rk3308 and rk3308b route tables are
-  identical between 6.1 and the port. The stable midpoint
+  were raised are outside the stable span but not outside the problem:
+  the rk3308 iomux route update (a8f254854858) and the dw_mmc
+  tasklet-to-BH-workqueue conversion (921c87ba3893) are both v6.11-rc1
+  mainline, so present throughout 6.12.69 to 6.12.111 and unable to
+  explain that drop. An earlier note here said both were already in
+  rithum-6.1; `merge-base --is-ancestor` says neither is in rithum-6.1
+  nor in the 6.6 bisection point, so both straddle the 6.6-to-6.12.69
+  half exactly (meta-rithum caught this). Of the two, the route update
+  is dead on content: the vendor 6.1 tree already carries the rk3308
+  and rk3308b route tables that commit upstreamed, and the tables are
+  byte-identical between 6.1 and the port. The BH conversion is live:
+  6.1 runs dw_mmc's request state machine, including the code that
+  handles the CMD52 response timeout, from a tasklet, the port from
+  `system_bh_wq`. Same softirq-level latency class, different
+  scheduling and re-entry rules. `claude/exp-revert-mmc-bh`
+  (a873a5472cf) is the port with dw_mmc alone put back on the tasklet;
+  the other twelve hosts the commit touched are left as they are. It is
+  expected to reach sshd and is the only build prepared for the
+  6.6-to-6.12.69 half. The stable midpoint
   `claude/bisect-6.12.90` (818307b7b44) is built and waiting on the
   port's twelve boots. A and C stay bounds, not a fix: a fixed delay
   would hide a margin that a cold boot or another card lot could
@@ -807,6 +821,46 @@ The two halves are bisected separately:
   which side of v6.12.86 the fault sits, and the revert build decides
   whether that commit alone carries it.
 
+  **`exp-no-cpufreq` 4 of 12** (b18a364c1f3, gated on kernel version
+  before any boot counted), bimodal as ever: every failure exactly four
+  errors, every pass zero, no refcount underflows. That kills the
+  voltage line in both of its forms at once. With CPU_FREQ off there
+  are no OPP transitions, and vdd_core sits at 1011680 uV (the DT's
+  1015000 init value on the nearest duty step, 1793/5000 inverted)
+  instead of the 950120 uV the interactive governor settles at. So the
+  rail is 62 mV higher, the transitions are gone, and the rate is
+  indistinguishable from the port's own. A clean result here would have
+  been confounded between the two; a failing one is not. Neither the
+  transitions nor the steady-state core voltage is the mechanism. The
+  bootargs-only confirmations (`cpufreq.off=1`,
+  `cpufreq.default_governor=performance`) are no longer needed.
+
+  **The 6.6 anchor is not established.** The table's two drops are not
+  equally supported. 6.1 against 6.12.69 (12 of 12 against 17 of 24) is
+  p about 0.03; 6.12.69 against the port (17 of 24 against 1 of 6) is p
+  about 0.015; both hold. But 6.6's 8 of 8 against 6.12.69's 17 of 24
+  is p about 0.14, so "6.6 to 6.12.69 is the primary regression" rests
+  on eight boots. Four more 6.6 boots cost nothing but device time and
+  decide whether there are two drops (6.6 really near 8 of 8, and the
+  BH conversion matters) or one (6.6 near 71 percent, everything before
+  6.12.69 is noise and only the stable window is real). They go
+  wherever they fit between flashes.
+
+  Vehicles built and banked by meta-rithum, independent of the deploy
+  directory, so any of them can start without a build: 6.1.188
+  (12 of 12), 6.12.69 pre-merge + rithum, 6.12.111 CPU_FREQ off, and
+  the port itself (ready for its twelve boots and the reads). Unit 0002
+  is with Alex for a vendor-devkey provisioning test; the next flash
+  waits on that.
+
+  Run order: the port's twelve boots (with the reads riding along: OPP
+  debugfs `u_volt_target`, vdd_core, pwm0 duty, cpufreq state, dmesg
+  `volt-sel`/`pvtm`/`idc`, and the pwrseq probe timestamps that give
+  the reset-pulse length), four more 6.6 boots when convenient, then
+  `exp-revert-probe-ready`, then `.90` if the revert does not move the
+  rate, then `exp-revert-mmc-bh` only if the extra 6.6 boots keep the
+  first drop alive.
+
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
   unit until it has booted somewhere: a boot on the layer's QEMU
@@ -819,8 +873,11 @@ The two halves are bisected separately:
   6.12-based points (`bisect-pre-merge-6.12.69`, `.80`, `.90`, `.100`,
   `pre-merge-plus-rithum`) are the port's own config and drivers with
   only the stable span varied, and the pre-merge tree reached sshd on
-  twelve boots, so they are expected to. `bisect-6.6` at 9f76f114ed2 has the panic fixed and is still
-  unbooted; it needs a console-attended first boot.
+  twelve boots, so they are expected to. `bisect-6.6` reached sshd at 9f76f114ed2 and ran 8 of 8; the later
+  fixes on that branch (vendor storage fops shift, regulator lock,
+  RNG config) change nothing on the SDIO path but its tip ff18b4898c2
+  still wants a console-attended first boot before it is used for the
+  extra anchor boots, per the rule above.
 
 Until that is done, the port ships without WiFi being reliable, or it
 does not ship. A and C are not acceptable substitutes: they relocate
@@ -1108,13 +1165,18 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   use-after-free behind it is not fixed. Watch pstore for `refcount_t:
   underflow` across the reboot loop; design the cookie capture the 6.1
   comment asks for.
-- WiFi SDIO is intermittent on 6.12 (4.2): 6.1 passes 6 of 6 on the
-  same unit, the port 1 of 6. The software side is exhausted: every
-  readable register, clock, pin, GPIO level, config and probe timeline
-  is identical between the kernels. It needs the bench (scope on CLK,
-  CMD and the module's rails across the clock switch; real power
-  cycles). The delay variants A and C are not fixes. This blocks
-  calling the port done.
+- WiFi SDIO is intermittent on 6.12 (4.2): 6.1 passes 12 of 12 on the
+  same unit, 6.6 8 of 8, 6.12.69 17 of 24, the port 1 of 6. Everything
+  readable on the SoC side is identical between the kernels; DVFS,
+  bus rate, timing mode and sample phase are excluded. The
+  6.12.69-to-6.12.111 stable span is the established step (single
+  commit test `exp-revert-probe-ready`, midpoint `.90`); the
+  6.6-to-6.12.69 half needs four more 6.6 boots before it counts
+  (single-commit test `exp-revert-mmc-bh` ready). The bench (scope on
+  WL_REG_ON, CLK, CMD and the module's rails across the clock switch;
+  real power cycles) is next if the software bisection does not
+  land. The delay variants A and C are not fixes. This blocks calling
+  the port done.
 - The RS variant shares every fix here and has not been booted.
 - Branch naming: this is `claude/kernel-6-12-port-kg1g39`; it wants a
   `rithum-6.12` home.
