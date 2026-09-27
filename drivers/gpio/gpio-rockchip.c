@@ -1203,7 +1203,7 @@ static int rockchip_gpio_probe(struct platform_device *pdev)
 		struct gpio_chip *gc = &bank->gpio_chip;
 
 		ret = gpiochip_add_pin_range(gc, dev_name(pctldev->dev), 0,
-					     bank->pin_base, gc->ngpio);
+					     gc->base, gc->ngpio);
 		if (ret) {
 			dev_err(bank->dev, "Failed to add pin range\n");
 			goto err_unlock;
