@@ -1296,8 +1296,11 @@ The two halves are bisected separately:
 
   Running now: `exp-sync-fixed-regulator` (d78c27ea1a2 as 6.12.111,
   gated), twelve boots with the full dmesg captured so the io-domain
-  probe order is recorded per boot; 3 of 3 with zero errors at the
-  time of writing, against the port's 2 of 12. Prediction as stated: toward 24 of
+  probe order is recorded per boot; interim 11 of 11 with zero errors
+  in every boot, against the port's 2 of 12 on the same base (eleven
+  consecutive passes at the port's rate is about one in five million).
+  Final count and the per-boot io-domain evidence to follow before
+  anything above is restated as fact. Prediction as stated: toward 24 of
   24 if the ordering is the mechanism; near 2 of 12 and the whole chain
   above collapses, the graded-decline reading with it.
 
@@ -1338,10 +1341,24 @@ The two halves are bisected separately:
      rithum variant inherits `vccio4-supply = <&vccio_sdio>` = vcc_1v8
      from the voice-module dtsi and none overrides it (checked by
      meta-rithum across -switch, -rs, -rsp and -bench), so VCCIO4_1V8
-     is right for the whole family by the DT. But the DT is our
-     description of the hardware, not a measurement of it, and the
-     error in the other direction risks the SoC, not a failed boot: the
-     rail wants confirming on a meter per variant before this goes in.
+     is right for the whole family by the DT. The schematic settles
+     the overvoltage question (meta-rithum, from rendered sheets of
+     `docs/reference/86S2-MainBoard-circuit.pdf` in the layer): on
+     sheet 10 VCCIO_SDIO is fed from VCC_1V8 through R2224, a fitted
+     0R, while the VCC_IO path through R2226 is 0/NC, depopulated, with
+     the variant table giving 3.3 V only for SDIO 2.0 builds. VCCIO4 is
+     hard-wired to 1.8 V and cannot be 3.3 V without moving a resistor.
+     Sheet 2 corroborates the rest of the chain: LDO2 makes VCC_1V8 and
+     its load list includes SARADC_AVDD_1V8, which is why saradc's -517
+     is a proxy for that regulator; the power-up timing and IO domain
+     tables give VCCIO4 as 1.8 V default, WiFi (SDIO). One caveat kept
+     on purpose: the file's title block is dated June 2014 and it reads
+     as the ODM reference for the voice-module mainboard, which is what
+     the DTS includes, not a production Rithum build. "The reference
+     design is fitted this way" is not quite "our panels are fitted
+     this way", and the change is in TPL, so the remaining step is a
+     one-line BOM confirmation (R2224 fitted, R2226 not) from whoever
+     owns it. Not a meter, not a per-variant measurement.
      Deploying it also means replacing TPL: a bad bootchain write on
      this board is a maskrom brick, SD boot is impossible because the
      SD pins are muxed with UART2, and recovery is USB maskrom with
@@ -1349,7 +1366,8 @@ The two halves are bisected separately:
      already the riskiest operation in the update tooling. So: better
      engineering, worse thing to be wrong about, and it belongs behind
      a per-variant rail measurement and a TPL review by whoever owns
-     the bootchain. Once in, it makes the io-domain's write a no-op and
+     the bootchain, which is now the only objection left. Once in, it
+     makes the io-domain's write a no-op and
      immunises every later kernel against this race; the kernel-side
      dependency then becomes belt to its braces.
 
