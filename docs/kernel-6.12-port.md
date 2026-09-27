@@ -511,14 +511,20 @@ misconfiguration.
 The two halves are bisected separately:
 
 - The stable span, by intermediate tags. Every one of the 43 tags is
-  an ancestor of v6.12.111, and the midpoint merge is prepared:
-  `v6.12.90` onto the pre-merge tree, thirteen conflicts, eleven of
-  them files stable never touched again after .90 (the .111 resolution
-  taken verbatim) and the two mmc hosts resolved by taking the .111
-  resolution and removing the one later stable commit each. It sits on
-  a local bisection branch awaiting permission to push. Twelve boots
-  per point; about six points to a single stable release, and the
-  candidates in that release are then readable. Stable commits in the
+  an ancestor of v6.12.111. Three points are pushed, each the
+  pre-merge tree (`claude/bisect-pre-merge-6.12.69`, 8fbd6a00c3d) with
+  one stable tag merged: `claude/bisect-6.12.80` (1a5bbe7f798),
+  `claude/bisect-6.12.90` (5efa36aeaaf) and `claude/bisect-6.12.100`
+  (7f574f49199). Conflicts were resolved by one rule: a file stable
+  never touched again after that tag takes the v6.12.111 merge's
+  resolution verbatim, and a file it did touch again takes that
+  resolution with the later stable commits reverse-applied (the mmc
+  hosts, i2c-core-base.c, arch/arm64/Kconfig). Each point's vendor
+  delta in those files was checked to equal the .111 merge's, and the
+  affected drivers compile with clang for ARM. Run .90 first, then .80
+  or .100 by its result. Twelve boots per point; about six points to
+  a single stable release, and the candidates in that release are then
+  readable. Stable commits in the
   span that plausibly move boot timing or a margin, for when the range
   narrows: the driver-core deferred-probe timeout trio (67c79e1cdbf,
   d25dadf7423, 962eae1f30e, which change when fw_devlink relaxes
