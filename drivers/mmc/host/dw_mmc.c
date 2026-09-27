@@ -529,7 +529,7 @@ static void dw_mci_dmac_complete_dma(void *arg)
 	 */
 	if (data) {
 		set_bit(EVENT_XFER_COMPLETE, &host->pending_events);
-		queue_work(system_bh_wq, &host->bh_work);
+		tasklet_schedule(&host->tasklet);
 	}
 
 	if (host->need_xfer_timer)
@@ -1917,7 +1917,7 @@ static enum hrtimer_restart dw_mci_fault_timer(struct hrtimer *t)
 	if (!host->data_status) {
 		host->data_status = SDMMC_INT_DCRC;
 		set_bit(EVENT_DATA_ERROR, &host->pending_events);
-		queue_work(system_bh_wq, &host->bh_work);
+		tasklet_schedule(&host->tasklet);
 	}
 
 	spin_unlock_irqrestore(&host->irq_lock, flags);
@@ -2173,9 +2173,9 @@ static bool dw_mci_clear_pending_data_complete(struct dw_mci *host)
 	return true;
 }
 
-static void dw_mci_work_func(struct work_struct *t)
+static void dw_mci_tasklet_func(struct tasklet_struct *t)
 {
-	struct dw_mci *host = from_work(host, t, bh_work);
+	struct dw_mci *host = from_tasklet(host, t, tasklet);
 	struct mmc_data	*data;
 	struct mmc_command *cmd;
 	struct mmc_request *mrq;
@@ -2230,7 +2230,7 @@ static void dw_mci_work_func(struct work_struct *t)
 				 * will waste a bit of time (we already know
 				 * the command was bad), it can't cause any
 				 * errors since it's possible it would have
-				 * taken place anyway if this bh work got
+				 * taken place anyway if this tasklet got
 				 * delayed. Allowing the transfer to take place
 				 * avoids races and keeps things simple.
 				 */
@@ -2932,7 +2932,7 @@ static void dw_mci_cmd_interrupt(struct dw_mci *host, u32 status)
 	smp_wmb(); /* drain writebuffer */
 
 	set_bit(EVENT_CMD_COMPLETE, &host->pending_events);
-	queue_work(system_bh_wq, &host->bh_work);
+	tasklet_schedule(&host->tasklet);
 
 	dw_mci_start_fault_timer(host);
 }
@@ -3002,7 +3002,7 @@ static irqreturn_t dw_mci_interrupt(int irq, void *dev_id)
 				set_bit(EVENT_DATA_COMPLETE,
 					&host->pending_events);
 
-			queue_work(system_bh_wq, &host->bh_work);
+			tasklet_schedule(&host->tasklet);
 
 			spin_unlock(&host->irq_lock);
 		}
@@ -3024,7 +3024,7 @@ rv1106_sd:
 					dw_mci_read_data_pio(host, true);
 			}
 			set_bit(EVENT_DATA_COMPLETE, &host->pending_events);
-			queue_work(system_bh_wq, &host->bh_work);
+			tasklet_schedule(&host->tasklet);
 
 			spin_unlock(&host->irq_lock);
 		}
@@ -3339,7 +3339,7 @@ static void dw_mci_cmd11_timer(struct timer_list *t)
 
 	host->cmd_status = SDMMC_INT_RTO;
 	set_bit(EVENT_CMD_COMPLETE, &host->pending_events);
-	queue_work(system_bh_wq, &host->bh_work);
+	tasklet_schedule(&host->tasklet);
 }
 
 static void dw_mci_cto_timer(struct timer_list *t)
@@ -3385,7 +3385,7 @@ static void dw_mci_cto_timer(struct timer_list *t)
 		 */
 		host->cmd_status = SDMMC_INT_RTO;
 		set_bit(EVENT_CMD_COMPLETE, &host->pending_events);
-		queue_work(system_bh_wq, &host->bh_work);
+		tasklet_schedule(&host->tasklet);
 		break;
 	default:
 		dev_warn(host->dev, "Unexpected command timeout, state %d\n",
@@ -3415,7 +3415,7 @@ static void dw_mci_xfer_timer(struct timer_list *t)
 		host->data_status = SDMMC_INT_DRTO;
 		set_bit(EVENT_DATA_ERROR, &host->pending_events);
 		set_bit(EVENT_DATA_COMPLETE, &host->pending_events);
-		queue_work(system_bh_wq, &host->bh_work);
+		tasklet_schedule(&host->tasklet);
 		break;
 	default:
 		dev_warn(host->dev, "Unexpected xfer timeout, state %d\n",
@@ -3466,7 +3466,7 @@ static void dw_mci_dto_timer(struct timer_list *t)
 		host->data_status = SDMMC_INT_DRTO;
 		set_bit(EVENT_DATA_ERROR, &host->pending_events);
 		set_bit(EVENT_DATA_COMPLETE, &host->pending_events);
-		queue_work(system_bh_wq, &host->bh_work);
+		tasklet_schedule(&host->tasklet);
 		break;
 	default:
 		dev_warn(host->dev, "Unexpected data timeout, state %d\n",
@@ -3746,7 +3746,7 @@ int dw_mci_probe(struct dw_mci *host)
 	else
 		host->fifo_reg = host->regs + DATA_240A_OFFSET;
 
-	INIT_WORK(&host->bh_work, dw_mci_work_func);
+	tasklet_setup(&host->tasklet, dw_mci_tasklet_func);
 	ret = devm_request_irq(host->dev, host->irq, dw_mci_interrupt,
 			       host->irq_flags, "dw-mci", host);
 	if (ret)
