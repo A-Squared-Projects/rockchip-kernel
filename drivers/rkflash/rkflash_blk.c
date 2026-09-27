@@ -498,7 +498,20 @@ static int rkflash_blk_add_dev(struct flash_blk_dev *dev,
 
 	gd = blk_mq_alloc_disk(blk_ops->tag_set, dev);
 	if (IS_ERR(gd))
-		return -ENOMEM;
+		return PTR_ERR(gd);
+
+	/*
+	 * The disk must keep the queue blk_mq_alloc_disk() made for it:
+	 * since 6.2 the queue's sysfs kobject lives in the gendisk and
+	 * registration reaches it through q->disk, which only that queue
+	 * has. Swapping in a separately made queue leaves q->disk NULL and
+	 * device_add_disk() faults in elv_register_queue().
+	 */
+	blk_ops->rq = gd->queue;
+	blk_queue_max_hw_sectors(gd->queue, MTD_RW_SECTORS);
+	blk_queue_max_segments(gd->queue, MTD_RW_SECTORS);
+	blk_queue_max_discard_sectors(gd->queue, UINT_MAX >> 9);
+	gd->queue->limits.discard_granularity = 64 << 9;
 
 	dev->blk_ops = blk_ops;
 	dev->size = part->size;
@@ -529,7 +542,6 @@ static int rkflash_blk_add_dev(struct flash_blk_dev *dev,
 
 	gd->private_data = dev;
 	dev->blkcore_priv = gd;
-	gd->queue = blk_ops->rq;
 
 	if (part->type == PART_NO_ACCESS)
 		dev->disable_access = 1;
@@ -544,8 +556,10 @@ static int rkflash_blk_add_dev(struct flash_blk_dev *dev,
 		set_disk_ro(gd, 1);
 
 	ret = add_disk(gd);
-	if (ret)
+	if (ret) {
 		list_del(&dev->list);
+		put_disk(gd);
+	}
 
 	return ret;
 }
@@ -556,7 +570,6 @@ static int rkflash_blk_remove_dev(struct flash_blk_dev *dev)
 
 	gd = dev->blkcore_priv;
 	list_del(&dev->list);
-	gd->queue = NULL;
 	del_gendisk(gd);
 	put_disk(dev->blkcore_priv);
 	kfree(dev);
@@ -597,20 +610,6 @@ static int rkflash_blk_register(struct flash_blk_ops *blk_ops)
 				      BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_BLOCKING);
 	if (ret)
 		goto error2;
-	blk_ops->rq = blk_mq_init_queue(blk_ops->tag_set);
-	if (IS_ERR(blk_ops->rq)) {
-		ret = PTR_ERR(blk_ops->rq);
-		blk_ops->rq = NULL;
-		goto error2;
-	}
-
-	blk_ops->rq->queuedata = dev;
-
-	blk_queue_max_hw_sectors(blk_ops->rq, MTD_RW_SECTORS);
-	blk_queue_max_segments(blk_ops->rq, MTD_RW_SECTORS);
-
-	blk_queue_max_discard_sectors(blk_ops->rq, UINT_MAX >> 9);
-	blk_ops->rq->limits.discard_granularity = 64 << 9;
 
 	if (g_flash_type == FLASH_TYPE_SFC_NAND || g_flash_type == FLASH_TYPE_NANDC_NAND)
 		nand_gc_thread = kthread_run(nand_gc_mythread, (void *)blk_ops, "rkflash_gc");
@@ -623,12 +622,14 @@ static int rkflash_blk_register(struct flash_blk_ops *blk_ops)
 	part.name[0] = 0;
 	ret = rkflash_blk_add_dev(dev, blk_ops, &part);
 	if (ret)
-		goto error2;
+		goto error3;
 
 	rkflash_blk_create_procfs();
 
 	return 0;
 
+error3:
+	blk_mq_free_tag_set(blk_ops->tag_set);
 error2:
 	kfree(blk_ops->tag_set);
 error1:
@@ -648,6 +649,7 @@ static void rkflash_blk_unregister(struct flash_blk_ops *blk_ops)
 
 		rkflash_blk_remove_dev(dev);
 	}
+	blk_mq_free_tag_set(blk_ops->tag_set);
 	unregister_blkdev(blk_ops->major, blk_ops->name);
 }
 
