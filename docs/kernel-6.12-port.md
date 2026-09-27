@@ -1404,8 +1404,8 @@ The two halves are bisected separately:
      The defensible form reproduces the one-line experiment exactly.
      It is cherry-picked onto the port branch; whether the
      vendor-tree change to fixed-regulator probing is acceptable to
-     ship is Alex's call, and the DT line stands on its own as the
-     correct hardware description either way.
+     ship was then settled by measurement: the DT line alone is
+     sufficient (below) and the driver line is removed again.
 
      Which of these is "the fix" (Alex's question): the kernel one.
      The kernel already owns pad-voltage configuration through the DT:
@@ -1425,11 +1425,35 @@ The two halves are bisected separately:
      consumers in list order; the io-domain is synchronous and takes
      microseconds, dw_mmc is async and takes hundreds of milliseconds
      before the switch) but not guaranteed by anything in the core,
-     which is why the branch on the port also carries the synchronous
-     `regulator-fixed` line. Twelve boots on the DT-only vehicle say
-     whether the guarantee is needed in practice; if it is 12 of 12,
-     the driver line can be dropped and the port fix becomes one DT
-     property, which is the version that would also be right upstream.
+     which is why the branch on the port at first also carried the
+     synchronous `regulator-fixed` line.
+
+     **DT-only: 12 of 12, zero errors** (bf7f3c2dbd9 as 6.12.111, gated,
+     stock bootloader confirmed on the unit before any boot counted:
+     the U-Boot test image was replaced, `androidboot.fwver` back to the
+     release value, `/serial-number` absent again, so the result is
+     attributable to the DT property alone). The four-way table:
+
+         port, unfixed kernel, stock U-Boot                  2 of 12
+         vqmmc-supply only, stock U-Boot                    12 of 12
+         vqmmc-supply + synchronous regulator-fixed         12 of 12
+         unfixed kernel, VCCIO4 1.8 V in U-Boot proper      12 of 12
+
+     **The fix is one DT property**: `vqmmc-supply = <&vccio_sdio>` on
+     the sdio node. No driver change, no bootloader change, nothing that
+     needs defending upstream. The "unordered on the deferred queue"
+     objection (raised by meta-rithum, accepted here) described a
+     possibility the retry order does not realise: once dw_mmc defers on
+     the supply, the regulator's registration is the event that re-runs
+     the deferred list, and the io-domain, which deferred on the same
+     regulator earlier, has applied the pad mode by the time dw_mmc's
+     retry runs. The synchronous `regulator-fixed` probe was the
+     diagnostic that found the mechanism and it should not outlive it:
+     it is removed from the port again in the commit after the fix. The
+     U-Boot VCCIO4 change is hardening (it puts the pads in the state
+     the DT claims independent of probe order, so it would also cover a
+     future consumer that attaches without naming its supply), behind
+     the BOM line and Alex's call, and not urgent.
 
      The bootloader change is hardening, staged, not first. The
      write in U-Boot's TPL that selects 3.3 V for VCCIO4 is the
@@ -1799,13 +1823,22 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   use-after-free behind it is not fixed. Watch pstore for `refcount_t:
   underflow` across the reboot loop; design the cookie capture the 6.1
   comment asks for.
-- WiFi SDIO (4.2): fixed. The kernel-side fix (DT supply plus
-  synchronous fixed-regulator probe) is 12 of 12 on hardware and is on
-  this branch. Still to do: cold boots; the U-Boot proper VCCIO4 change
-  (built by meta-rithum, being tested with the unmodified port kernel)
-  behind a BOM check and a bootchain review; Alex's decision on
-  shipping the fixed-regulator probe change versus the DT line alone.
-  The delay variants A and C are withdrawn.
+- WiFi SDIO (4.2): fixed, by one DT property on the sdio node,
+  12 of 12 on hardware with the stock bootloader; on this branch. The
+  only remaining gap is cold boots: about 190 boots in the whole
+  investigation and every one a warm reboot, and cold boot is where
+  rail settling and loader timing differ most. That needs a power
+  cycle at the bench. The U-Boot VCCIO4 hardening is optional and
+  behind a BOM check. A and C are withdrawn.
+- Bootloader findings from the same session, not kernel work but
+  worth keeping (meta-rithum, verified on hardware): `/serial-number`
+  reaches userspace once `CONFIG_ROCKCHIP_SET_SN` and
+  `CONFIG_PASS_DEVICE_SERIAL_BY_FDT` are on (both were off, which is
+  why the root-node hook was inert); `CONFIG_ROCKCHIP_SET_ETHADDR`
+  disabled stops U-Boot minting a random LAN MAC into vendor storage
+  on a unit with an unprogrammed LAN_MAC_ID, which needed a coupling
+  fix because two constants used by the serial path were declared
+  inside that guard.
 - The RS variant shares every fix here and has not been booted.
 - Branch naming: this is `claude/kernel-6-12-port-kg1g39`; it wants a
   `rithum-6.12` home. This document and the regulator fix also live on
@@ -1851,11 +1884,12 @@ Applies to rithum-6.1 today:
   cause is found (4.2): the loader hands the kernel the SDIO bank in
   3.3 V pad mode, only the io-domain driver corrects it, and from v6.4
   that correction races the SDIO attach because `regulator-fixed`
-  probes asynchronously. With the race removed the port is 12 of 12,
+  probes asynchronously. With `vqmmc-supply = <&vccio_sdio>` on the
+  sdio node, one DT property and nothing else, the port is 12 of 12,
   level with 6.1; there is no ceiling. The 76 percent figure stated in
   an earlier revision of this section is withdrawn. Any kernel newer
-  than 6.4 on this board needs the kernel-side ordering fix or the
-  U-Boot pad-mode fix; 6.1 needs neither. A
+  than 6.4 on this board needs that DT property (the 6.6 branch
+  included); 6.1 does not, though the property is correct there too. A
   decision to bail on 6.12 should weigh that a 6.6-based port carries
   the same ceiling.
 - Evidence rules (6) and the merge method for stable into a vendor
