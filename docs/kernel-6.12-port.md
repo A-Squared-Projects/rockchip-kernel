@@ -811,6 +811,7 @@ The two halves are bisected separately:
       6.12.69 pre-merge, plain         7 of 12
       6.12.69 pre-merge + rithum stack 10 of 12
       6.12.90 (pre-merge + v6.12.90)   8 of 12
+      6.12.100 (pre-merge + v6.12.100) 4 of 12
       6.12.111 port                    2 of 12
 
   The 6.12.69-to-6.12.111 stable span is the only established step
@@ -1268,11 +1269,63 @@ The two halves are bisected separately:
   The saradc test runs on the port afterwards, not on a bisection
   point, because initcall_debug's printk load changes timing on a
   timing-sensitive fault and the two questions must not share a
-  vehicle. Run order now: `.100`; then tests 1 and 2 above; then
-  `exp-sync-fixed-regulator`; then `.80` or `.100` by its result. The reset
-  pulse itself is not in any capture (above) and waits on the bench.
-  Both 6.12.111 images report the same kernel version, so only the
-  VERSION_ID stamp separates them; every flash gates on it.
+  vehicle. The reset pulse itself is not in any capture (above) and
+  waits on the bench. Both 6.12.111 images report the same kernel
+  version, so only the VERSION_ID stamp separates them; every flash
+  gates on it.
+
+  **`.100`: 4 of 12** (8b433a4890f as 6.12.100, gated), 32 errors. It
+  localises nothing: against .90 p about 0.22, against the port p about
+  0.64, distinguishable from neither, though genuinely worse than .69
+  (p about 0.03). The four points read 71, 67, 33, 17 percent across 43
+  tags, which is the shape of an accumulating loss of margin, not of one
+  commit. Under the mechanism above that is what should happen: the
+  race exists throughout, and anything that shifts probe timing
+  (workqueue behaviour, initcall ordering, a driver added or reordered,
+  deferred-probe cadence) costs a slice of the window in which the
+  io-domain can land before the switch. Several such commits each
+  taking a slice give exactly this curve and leave no culprit.
+
+  **The tag bisection stops here** (agreed with meta-rithum). What it
+  delivered is the bound: the loss is spread across .69 to .111 and is
+  not one commit, which is a conclusion in its own right. Naming a
+  commit would matter only if we meant to revert one, and reverting a
+  timing shift to make a race lose less often would be treating the
+  symptom. Twelve more boots at .100 or a .95 point are not the right
+  spend; the mechanism test is the whole answer, not a complement.
+
+  Running now: `exp-sync-fixed-regulator` (d78c27ea1a2 as 6.12.111,
+  gated), twelve boots with the full dmesg captured so the io-domain
+  probe order is recorded per boot. Prediction as stated: toward 24 of
+  24 if the ordering is the mechanism; near 2 of 12 and the whole chain
+  above collapses, the graded-decline reading with it.
+
+  If it lands, follow-ups in priority order:
+
+  1. The one-boot confirmation from the other side: a G-instrumented
+     boot of the sync image showing the io-domain never defers.
+  2. The real fix, which is not the experiment. Dropping async probe
+     from `regulator-fixed` globally is a big hammer on a shared driver
+     and would not go upstream for one board's convenience, though it
+     is acceptable in this vendor tree with a comment. The defensible
+     kernel versions are an explicit dependency: `vqmmc-supply =
+     <&vccio_sdio>` on the sdio node (correct, smaller, testable the
+     same way, but leaves io-domain and dw_mmc unordered on the
+     deferred queue), or a device link from the mmc host to the
+     io-domain. And one option outside the kernel that the loader
+     finding opens: U-Boot for this board should set VCCIO4 to 1.8 V
+     mode instead of the rk3308 default of 3.3 V, since the rail is
+     1.8 V by design. Then the hand-off is already correct, the
+     io-domain's later write is a no-op, and every kernel from 6.1 to
+     the 6.6 fallback to the port is fixed at once without touching a
+     shared driver. The U-Boot comment's warning is about boards that
+     supply 3.3 V there; this board does not. That is the fix that
+     survives every kernel decision; the kernel-side dependency is the
+     belt to its braces.
+  3. Cold boots. Every entry in the table is a warm reboot. If the
+     mechanism is probe timing against the loader's hand-off, cold boot
+     is where the rails and the loader's own timing differ most, and
+     none of the hundred-plus boots says anything about it.
 
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
@@ -1590,7 +1643,9 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   kernels; DVFS, bus rate, timing mode and sample phase are excluded,
   and 6.6 to 6.12.69 is one band. The 6.12.69-to-6.12.111 stable span
   is the only established step (single-commit test
-  `exp-revert-probe-ready` negative; midpoint `.90` running). Leading
+  `exp-revert-probe-ready` negative; tag bisection stopped at 71, 67,
+  33, 17 percent across .69/.90/.100/.111, a graded decline, not a
+  step). Leading
   hypothesis: io-domain pad mode set after the SDIO attach because
   regulator-fixed probes asynchronously from v6.4 (4.2); test branch
   `exp-sync-fixed-regulator`. 6.1 is 24 of 24; every newer
