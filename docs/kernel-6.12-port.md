@@ -216,7 +216,7 @@ no-op (the GPIO core registers the range from the DT and the driver
 skips its fallback); it is insurance against a backport of the base
 change, not a fix, and belongs with the upstream submission.
 
-### 4.2 WiFi SDIO timeouts: open, intermittent, and not the pin bug
+### 4.2 WiFi SDIO timeouts: found. The SDIO pads were in the wrong voltage mode when the card was clocked
 
 **Status: open.** An earlier version of this section said the
 `gpio-ranges` commit had fixed it. That was called on two passing boots.
@@ -1294,20 +1294,62 @@ The two halves are bisected separately:
   symptom. Twelve more boots at .100 or a .95 point are not the right
   spend; the mechanism test is the whole answer, not a complement.
 
-  Running now: `exp-sync-fixed-regulator` (d78c27ea1a2 as 6.12.111,
-  gated), twelve boots with the full dmesg captured so the io-domain
-  probe order is recorded per boot; interim 11 of 11 with zero errors
-  in every boot, against the port's 2 of 12 on the same base (eleven
-  consecutive passes at the port's rate is about one in five million).
-  Final count and the per-boot io-domain evidence to follow before
-  anything above is restated as fact. Prediction as stated: toward 24 of
-  24 if the ordering is the mechanism; near 2 of 12 and the whole chain
-  above collapses, the graded-decline reading with it.
+  **Mechanism test: 12 of 12, zero errors in every boot**
+  (`exp-sync-fixed-regulator`, d78c27ea1a2 as 6.12.111, gated on
+  kernel and VERSION_ID, full dmesg captured). The port on the identical
+  base, one line different, was 2 of 12 with 40 errors: p well under
+  0.0001, and 12 of 12 puts the port level with 6.1's 24 of 24 rather
+  than merely better. The full capture shows the ordering directly,
+  which the 0.8-2.5 s window had been hiding:
 
-  If it lands, follow-ups in priority order:
+      sync boot 1  [0.434528] rockchip-iodomain ff000000.grf:io-domains:
+                              vccio4(1800000 uV) supplied by vcc_1v8
+      sync boot 2  [0.323962] rockchip-iodomain ff000000.grf:io-domains:
+                              vccio4(1800000 uV) supplied by vcc_1v8
+      port FAIL    [1.397660] probe of ff000000.grf:io-domains
+                              returned -517 after 14 usecs
 
-  1. The one-boot confirmation from the other side: a G-instrumented
-     boot of the sync image showing the io-domain never defers.
+  With `regulator-fixed` synchronous the io-domain lands at 0.32 to
+  0.43 s, hundreds of milliseconds before the clock switch at about
+  1.0 s, on every boot, and names the chain: vccio4, 1.8 V, supplied by
+  vcc_1v8. On the failing async boot it was still deferring 300 ms
+  after the switch.
+
+  **The account, closed.** U-Boot's TPL leaves VCCIO4 in 3.3 V mode
+  deliberately; this board supplies 1.8 V there (schematic: R2224
+  fitted from VCC_1V8, R2226 to VCC_IO depopulated); the kernel's
+  io-domain driver is the only writer that corrects it; that write
+  waits on `regulator-fixed`, which v6.4 made probe asynchronously; and
+  the sdio node named no supply, so dw_mmc never waited. On a boot
+  where the io-domain had not landed by the switch, the card was
+  clocked at a high-speed rate through pads in the wrong mode, the
+  400 kHz identification having survived it. Everything else chased
+  here (bus rate, sample phase, timing mode, DVFS, the gpio commits,
+  the regulator clamp, internal phase, the probe-readiness commit, the
+  dw_mmc bottom half, the stable-tag bisection) was downstream of a pad
+  mode that was simply wrong at the moment the card was clocked. The
+  fault is not in 6.12, not in the stable span, not in drivers/mmc, and
+  not in the module: it is a race between a bootloader default and a
+  kernel probe order that 6.1 happened to win every time.
+
+  Retired by the result: the 76 percent ceiling stated earlier and in
+  section 9 (both drops are one mechanism; 12 of 12 is what the port
+  can be), and the graded decline across the tag window, which now
+  reads as commits shifting probe timing and costing margin in a race
+  with no culprit to name, which is why the bisection stalled at .100
+  and why stopping it was right. Two rates in the table above are
+  therefore not properties of those kernels but of how often the race
+  was lost on them.
+
+  Still open, in order:
+
+  1. Cold boots. Every one of the 130-plus boots in this investigation
+     is a warm reboot. The mechanism is probe timing against a
+     bootloader hand-off, and cold boot is where both differ most. This
+     is the one that could still surprise. The one-boot confirmation
+     from the other side (a G-instrumented boot of the sync image) is
+     no longer needed: the full-dmesg capture above already shows the
+     io-domain landing at fs_initcall time on every sync boot.
   2. The real fix, which is not the experiment. Two layers, in
      deployment order:
 
@@ -1332,7 +1374,8 @@ The two halves are bisected separately:
      `PROBE_FORCE_SYNCHRONOUS` on `regulator-fixed`, both with comments
      pointing here. Not tested on hardware; it runs only if the
      mechanism test lands and must reproduce that image's rate before
-     it ships. Expected to reach sshd.
+     it ships. Expected to reach sshd. Its target is now known: 12 of
+     12 with zero errors, on twelve boots.
 
      The root fix is in U-Boot and is staged, not first. The write that
      hands the kernel VCCIO4 in 3.3 V mode is in TPL, the first stage,
@@ -1379,10 +1422,8 @@ The two halves are bisected separately:
      immunise what comes after it; 6.1 has nothing to fix and the 6.6
      branch is a diagnostic.
 
-  3. Cold boots. Every entry in the table is a warm reboot. If the
-     mechanism is probe timing against the loader's hand-off, cold boot
-     is where the rails and the loader's own timing differ most, and
-     none of the hundred-plus boots says anything about it.
+  3. The RS variant shares the DT and the mechanism and has not been
+     booted on the port at all.
 
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
@@ -1694,24 +1735,13 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   use-after-free behind it is not fixed. Watch pstore for `refcount_t:
   underflow` across the reboot loop; design the cookie capture the 6.1
   comment asks for.
-- WiFi SDIO is intermittent on 6.12 (4.2): 6.1 passes 12 of 12 on the
-  same unit, 6.6 13 of 17, 6.12.69 17 of 24, the port 2 of 12.
-  Everything readable on the SoC side is identical between the
-  kernels; DVFS, bus rate, timing mode and sample phase are excluded,
-  and 6.6 to 6.12.69 is one band. The 6.12.69-to-6.12.111 stable span
-  is the only established step (single-commit test
-  `exp-revert-probe-ready` negative; tag bisection stopped at 71, 67,
-  33, 17 percent across .69/.90/.100/.111, a graded decline, not a
-  step). Leading
-  hypothesis: io-domain pad mode set after the SDIO attach because
-  regulator-fixed probes asynchronously from v6.4 (4.2); test branch
-  `exp-sync-fixed-regulator`. 6.1 is 24 of 24; every newer
-  base is at about 76 percent, so closing the stable window alone
-  leaves that ceiling (9). The bench
-  (scope on WL_REG_ON, CLK, CMD and the module's rails across the clock
-  switch; real power cycles) is next if the software bisection does
-  not land. The delay variants A and C are not fixes. This blocks
-  calling the port done.
+- WiFi SDIO (4.2): cause found and confirmed 12 of 12 on the mechanism
+  test. To ship: `claude/fix-sdio-iodomain-order` (DT supply plus
+  synchronous fixed-regulator probe) must reproduce 12 of 12 on
+  hardware; then cold boots; then the U-Boot VCCIO4 change behind a BOM
+  check and a bootchain review. The delay variants A and C are
+  withdrawn. The port is no longer blocked on this once the fix branch
+  is verified.
 - The RS variant shares every fix here and has not been booted.
 - Branch naming: this is `claude/kernel-6-12-port-kg1g39`; it wants a
   `rithum-6.12` home. This document and the regulator fix also live on
@@ -1753,13 +1783,15 @@ Applies to rithum-6.1 today:
   shown identical between kernels, the retired hypotheses, the rates,
   and the delay bound. rithum-6.1 is 24 of 24 with zero errors; every
   newer vendor base measured (6.6, 6.12.69) sits at about 76 percent,
-  and the 6.12 stable span from .69 to .111 drops that to 17. **The
-  ceiling for any port on a vendor base newer than 6.1 is about 76
-  percent per boot until the 6.1-to-6.6 difference is found**, and
-  that difference is not in drivers/mmc's SDIO path (read in full);
-  the leading candidate is the v6.4 asynchronous probe of
-  `regulator-fixed`, which lets the io-domain driver set the SDIO pad
-  mode after the attach (4.2). A
+  and the 6.12 stable span from .69 to .111 drops that to 17. The
+  cause is found (4.2): the loader hands the kernel the SDIO bank in
+  3.3 V pad mode, only the io-domain driver corrects it, and from v6.4
+  that correction races the SDIO attach because `regulator-fixed`
+  probes asynchronously. With the race removed the port is 12 of 12,
+  level with 6.1; there is no ceiling. The 76 percent figure stated in
+  an earlier revision of this section is withdrawn. Any kernel newer
+  than 6.4 on this board needs the kernel-side ordering fix or the
+  U-Boot pad-mode fix; 6.1 needs neither. A
   decision to bail on 6.12 should weigh that a 6.6-based port carries
   the same ceiling.
 - Evidence rules (6) and the merge method for stable into a vendor
@@ -1779,7 +1811,7 @@ Applies to any base newer than 6.1, whichever it is:
 - The 6.6 branch `claude/bisect-6.6` (ff18b4898c2) is a bootable
   develop-6.6 with all of the above applied and 13 of 17 on WiFi; it is
   the nearest fallback base if 6.12 is dropped, minus display and
-  touch, and it carries the 76 percent ceiling above.
+  touch; it carries the same race and needs the same fix.
 - Upstream candidates (7): `gpio-ranges` for rk3308.dtsi, `__NO_FORTIFY`
   in `atags_to_fdt.c`, the `uart4_rts_pin` label.
 
