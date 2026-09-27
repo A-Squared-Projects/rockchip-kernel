@@ -703,27 +703,40 @@ The two halves are bisected separately:
   gates pclk when idle and the block reads back 0x13 everywhere);
   debugfs is the source.
 
-  The refined statement: the SDIO clock switch fails when the core
-  rail has already dropped to its floor and passes when it has not.
-  That fits every result: 6.6 passes with the attach before cpufreq
-  starts; the port's one clean pass at 0.917 s against a fail at
-  0.939 s on the same image is a 22 ms window in which the first
-  governor step down would land; A and C pass on attempts after
-  about 1.25 s, when init is starting and the governor is back up;
-  6.1 attaches at 1.01 s, and its cpufreq driver initialised from
-  `module_init` where the port's registers a platform device with an
-  early init, so its first step down is later. The remaining reads
-  decide: on 6.1 and the port, the `initcall_debug` timestamps of
-  `rockchip-cpufreq` and `cpufreq-dt` against the attach (the
-  existing G captures hold them), and the same steady-state regulator,
-  pwm and cpufreq reads as above. Then `claude/exp-no-cpufreq`
-  (b18a364c1f3): twelve boots at 6.1's rate says the rail is the
-  mechanism, and the product fix is a voltage floor for this board's
-  low OPPs (Rockchip already keeps 1.0 V below 0 C via
-  `rockchip,low-temp-min-volt`, so the pattern exists) or SDIO I/O
-  margin at 950 mV, not anything in the SDIO driver. At the bench: a
-  scope on vdd_core through 0.85 to 1.3 s on the port, triggered on
-  the SDIO clock switch.
+  The transition-timing form of this did not survive the G captures:
+  cpufreq initialisation completes 58 ms before the 50 MHz switch on
+  6.1 (12 of 12), 64 ms before on a passing port boot and 59 ms before
+  on a failing one. The smallest gap belongs to the kernel that never
+  fails, the two port boots are within 1 ms of each other and diverge
+  anyway, and with an 80 ms minimum sample time the interactive
+  governor cannot have stepped down before the switch on any of the
+  three. What separates 6.1 from the port in the timeline is absolute
+  position (the port's mmc probe runs about 50 ms later and takes
+  10 ms longer), not the gap. The captures show only cpufreq
+  initialisation, so a later transition is not excluded by them, but
+  the init-time overlap is.
+
+  What survives is the steady-state form: at cpufreq init the rail is
+  moved from the DT's 1015 mV to the OPP voltage of whatever frequency
+  the loader left the CPU at, using the voltage column the OPP
+  selection code picks. 6.1 printed `pvtm-volt-sel=4`; the port prints
+  that only at debug level, and its OPP selection code differs (the
+  leakage path was reworked and an OTP-based table adjustment exists
+  that 6.1 does not have). If the port lands on a lower column, or
+  adjusts the table, the switch runs at a lower core voltage on every
+  boot, which is a margin loss of exactly the observed shape. Reads
+  that settle it, no build: `/sys/kernel/debug/opp/cpu0/opp:*/supply-0/
+  u_volt_target` on 6.1 and the port (the effective per-OPP voltages),
+  the steady vdd_core `microvolts` and pwm0 duty on both, and the
+  port's dmesg for `adjust opp-table by otp`, `volt-sel`, `pvtm` and
+  `idc`. Then `claude/exp-no-cpufreq` (b18a364c1f3), and if it is
+  clean, two bootargs-only confirmations on a byte-identical port
+  binary (a FIT repack, no rebuild): `cpufreq.off=1`, which must
+  reproduce the clean result, and `cpufreq.default_governor=performance`,
+  which keeps transitions out but the rail at the top OPP's voltage
+  and so separates "more margin" from "no transition". If the OPP
+  voltages and the steady rail match 6.1's and the no-cpufreq image
+  runs at the port's rate, this line is dead and the bench decides.
 
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
