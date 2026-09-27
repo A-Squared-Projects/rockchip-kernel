@@ -794,10 +794,26 @@ The two halves are bisected separately:
   handles the CMD52 response timeout, from a tasklet, the port from
   `system_bh_wq`. Same softirq-level latency class, different
   scheduling and re-entry rules. `claude/exp-revert-mmc-bh`
-  (a873a5472cf) is the port with dw_mmc alone put back on the tasklet;
-  the other twelve hosts the commit touched are left as they are. It is
-  expected to reach sshd and is the only build prepared for the
-  6.6-to-6.12.69 half. The stable midpoint
+  (7d09ea1c43d) is the 6.12.69 control point (`pre-merge-plus-rithum`,
+  08bc7102c28) with dw_mmc alone put back on the tasklet; the other
+  twelve hosts the commit touched are left as they are, and the stable
+  span does not touch dw_mmc.c or dw_mmc.h so the change reads the same
+  on either base. It is expected to reach sshd and is the only build
+  prepared for the 6.6-to-6.12.69 half.
+
+  Why the two single-commit reverts sit on different bases (meta-rithum
+  caught the first cut of this one, based on the port, before it cost a
+  run): a revert is measured against the baseline it can move.
+  `88e338bd9b6` is inside the stable window, so the port at about 17
+  percent is exactly where its effect appears, and
+  `exp-revert-probe-ready` stays on the port. `921c87ba3893` can only
+  explain the first drop, 8 of 8 to 17 of 24; on the port it would move
+  roughly 17 to 24 percent, 2 of 12 against 3 of 12, which no number of
+  boots separates behind the larger stable-window regression. On the
+  6.12.69 point, the best-measured baseline in the set with 24 boots, a
+  restored 12 of 12 against 17 of 24 is p about 0.03 in one run. The
+  plus-rithum arm is used rather than plain pre-merge because its image
+  is the one banked and, at 10 of 12, the cleaner of the two. The stable midpoint
   `claude/bisect-6.12.90` (818307b7b44) is built and waiting on the
   port's twelve boots. A and C stay bounds, not a fix: a fixed delay
   would hide a margin that a cold boot or another card lot could
@@ -850,15 +866,17 @@ The two halves are bisected separately:
   directory, so any of them can start without a build: 6.1.188
   (12 of 12), 6.12.69 pre-merge + rithum, 6.12.111 CPU_FREQ off, and
   the port itself (ready for its twelve boots and the reads). Unit 0002
-  is with Alex for a vendor-devkey provisioning test; the next flash
-  waits on that.
+  was to go to Alex for a vendor-devkey provisioning test; that is
+  deferred and the unit stays on the loop. The 6.6 anchor at ff18b4898c2
+  is flashing now, gated, with vendor-storage check and OPP reads before
+  its boots.
 
   Run order: the port's twelve boots (with the reads riding along: OPP
   debugfs `u_volt_target`, vdd_core, pwm0 duty, cpufreq state, dmesg
   `volt-sel`/`pvtm`/`idc`, and the pwrseq probe timestamps that give
   the reset-pulse length), four more 6.6 boots when convenient, then
   `exp-revert-probe-ready`, then `.90` if the revert does not move the
-  rate, then `exp-revert-mmc-bh` only if the extra 6.6 boots keep the
+  rate, then `exp-revert-mmc-bh` on its 6.12.69 base only if the extra 6.6 boots keep the
   first drop alive.
 
   Two rules from this. Every branch states whether it is expected to
@@ -1172,7 +1190,7 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   6.12.69-to-6.12.111 stable span is the established step (single
   commit test `exp-revert-probe-ready`, midpoint `.90`); the
   6.6-to-6.12.69 half needs four more 6.6 boots before it counts
-  (single-commit test `exp-revert-mmc-bh` ready). The bench (scope on
+  (single-commit test `exp-revert-mmc-bh` ready, on the 6.12.69 base). The bench (scope on
   WL_REG_ON, CLK, CMD and the module's rails across the clock switch;
   real power cycles) is next if the software bisection does not
   land. The delay variants A and C are not fixes. This blocks calling
