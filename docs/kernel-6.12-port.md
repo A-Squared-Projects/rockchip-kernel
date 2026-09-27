@@ -4,9 +4,11 @@ What was learned bringing the RK3308 Rithum Switch kernel from the
 rithum-6.1 tree (Rockchip develop-6.1 plus upstream stable) onto Rockchip's
 develop-6.12, and what it cost. Written while the port was brought up and
 debugged on RithumSwitch-0002 (Switch Pro, RK3308 rev B silicon), and
-kept current through the WiFi investigation. Branch: `rithum-6.12`
-(developed as `claude/kernel-6-12-port-kg1g39`), based on develop-6.12
-(470f9dccb, 6.12.69) with v6.12.111 merged on top.
+kept current through the WiFi investigation. Branch: `rithum-6.12`, a clean series of thirty commits based on
+develop-6.12 (470f9dccb, 6.12.69) with v6.12.111 merged on top. It was
+developed as `claude/kernel-6-12-port-kg1g39`, which keeps the full
+working history; commit hashes quoted in sections 2 to 6 are that
+branch's, and section 8 maps them to `rithum-6.12`.
 
 The short version: the port is 32-bit ARM, Thumb-2, same rkflash/SFTL
 NAND stack, same boot image layout. It passes the same selftest as 6.1
@@ -1842,22 +1844,24 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   fix because two constants used by the serial path were declared
   inside that guard.
 - The RS variant shares every fix here and has not been booted.
-- Branches: the port is `rithum-6.12`; `claude/kernel-6-12-port-kg1g39`
-  is the same history and can go once nothing points at it. This
-  document and the regulator debug-list fix also live on
-  `claude/port-findings`, branched from rithum-6.1, for merging there.
-  The eleven diagnostic branches are archived: their tips are all
-  parents of the content-free commit on
-  `claude/archive-6.12-port-diagnostics`, whose README lists them, so
-  every hash in this document resolves without them. Deleting the
-  branch refs themselves needs a credential that may delete refs on
-  this remote (the port session's could not); one `git push origin
-  --delete` with the eleven names in section 10 does it.
+- Branches: the port is `rithum-6.12`, a clean re-series with one
+  documentation commit at the end. `claude/kernel-6-12-port-kg1g39` is
+  the development branch with the full history, kept as the record
+  behind the hashes quoted here. This document and the regulator
+  debug-list fix also live on `claude/port-findings`, branched from
+  rithum-6.1, for merging there. The eleven diagnostic branches are
+  archived under `claude/archive-6.12-port-diagnostics` and await
+  deletion by a credential that may delete refs (10).
 - Upstream candidates: `gpio-ranges` for rk3308.dtsi, `__NO_FORTIFY` in
   `atags_to_fdt.c`, the `uart4_rts_pin` label fix.
 - Unit 0002's microphone, independent of the kernel.
 
-## 8. Commit map (470f9dccb..HEAD, code only)
+## 8. Commit map (470f9dccb..rithum-6.12)
+
+The series on `rithum-6.12`, oldest first. The eight commits before the
+merge are shared with the development branch; for the rest, the hash on
+the development branch that the narrative sections quote is given
+underneath.
 
     fd2b768965d  rkflash: port the block glue to the 6.12 block layer
     051f93bf107  rkflash: reach user memory from the thumb SFTL blob through C
@@ -1867,33 +1871,55 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
     fcf2915fb49  ARM: dts: rockchip: rk3308: point uart4 RTS bit-bang at the label that exists
     2634f62e07e  rithum_linux_defconfig: carry over from 6.1, re-canonicalised for 6.12
     f7ee4a0347b  clk: rockchip: rk3308: make rk3308_dump_cru static
-    2768495b95a  Merge tag 'v6.12.111'
-    b40b9a4b9f6  gpio: rockchip: convert bank->clk to devm_clk_get_enabled()
-    e16eaf90dd9  gpio: rockchip: change the GPIO version judgment logic
-    d03d42d565c  gpio: rockchip: teardown bugs and resource leaks
-    e7722fa482c  gpio: rockchip: fix generic IRQ chip leak on remove
-    2d0ceae0721  ARM: decompressor: keep FORTIFY_SOURCE out of atags_to_fdt.c
-    47227328c1f  gpio: rockchip: register the pin range by hardware pin base, not GPIO base
-    ea20c527a42  ASoC: codecs: rk3308: carry the vendor codec driver over from 6.1
-    4bcf324a148  arm64: dts: rockchip: rk3308: restore the vendor acodec node
-    c63830b0f5e  arm64: dts: rockchip: rk3308: describe the GPIO to pinctrl ranges
-    37ec8ecc376  serial: 8250: drop rockchip LSR break/frame-error diagnostic
-    27e267ccb8e  input: gt9xx: stop overwriting the panel's GT911 config
-    161e2f8fefc  rkflash: don't require FUNCTION_TRACER to link the ARM SFTL blobs
-    4b5252bac91  drm/panel: rithum: bit-bang the ST7701 SPI init over GPIOs
-    49d61b7249d  docs: record what the 6.12 port found
-    6bb9fb82405  drm/rockchip: fbdev: give /dev/fb0 back its read and write file operations
-    92cabc42992  optee: bound the shutdown wait for secure world to release its shm cache
-    720d6ab66d9  optee: leave the shm cache alone on reboot; only kexec needs it handed back
-    487b21b62cc  gt9xx: the GT911 restore needs a higher version byte (config header)
-    9adeb81c34c  rkflash: pin the file_operations layout the SFTL blobs bake in
-    8a97f566878  regulator: core: lock the vendor debug list; async probes corrupt it
-    d1cb5802600  mmc/regulator: order the SDIO attach after the io-domain sets the 1.8 V pad mode
-    60741904876  regulator: fixed: restore asynchronous probe; the DT dependency alone orders the SDIO attach
+    5a45eefe98f  Merge tag 'v6.12.111' into rithum-6.12
+                 (development branch: 2768495b95a)
+    b20798241ee  rkflash: don't require FUNCTION_TRACER to link the ARM SFTL blobs
+                 (development branch: 161e2f8fefc)
+    17d72aa3523  rkflash: pin the file_operations layout the SFTL blobs bake in
+                 (development branch: 9adeb81c34c)
+    38a9096809b  ARM: decompressor: keep FORTIFY_SOURCE out of atags_to_fdt.c
+                 (development branch: 2d0ceae0721)
+    576b47464ad  gpio: rockchip: convert bank->clk to devm_clk_get_enabled()
+                 (development branch: b40b9a4b9f6)
+    d3357b111ea  gpio: rockchip: change the GPIO version judgment logic
+                 (development branch: e16eaf90dd9)
+    97605e28a84  gpio: rockchip: teardown bugs and resource leaks
+                 (development branch: d03d42d565c)
+    3cc52a5c1aa  gpio: rockchip: fix generic IRQ chip leak on remove
+                 (development branch: e7722fa482c)
+    6a8b30de754  gpio: rockchip: register the pin range by hardware pin base, not GPIO base
+                 (development branch: 47227328c1f)
+    7631639a9d1  arm64: dts: rockchip: rk3308: describe the GPIO to pinctrl ranges
+                 (development branch: c63830b0f5e)
+    f0e7755ae13  serial: 8250: drop rockchip LSR break/frame-error diagnostic
+                 (development branch: 37ec8ecc376)
+    e66d353c85c  input: gt9xx: stop overwriting the panel's GT911 config
+                 (development branch: 27e267ccb8e)
+    773eddc03d0  input: gt9xx: document the anti-downgrade rule for restoring the GT911 config
+                 (development branch: 487b21b62cc)
+    59c444114b7  ASoC: codecs: rk3308: carry the vendor codec driver over from 6.1
+                 (development branch: ea20c527a42)
+    bd42b7aa66d  arm64: dts: rockchip: rk3308: restore the vendor acodec node
+                 (development branch: 4bcf324a148)
+    31d9bd4c3e6  drm/panel: rithum: bit-bang the ST7701 SPI init over GPIOs
+                 (development branch: 4b5252bac91)
+    5d873175297  drm/rockchip: fbdev: give /dev/fb0 back its read and write file operations
+                 (development branch: 6bb9fb82405)
+    9a2177d37cb  optee: bound the shutdown wait for secure world to release its shm cache
+                 (development branch: 92cabc42992)
+    17785722d73  optee: leave the shm cache alone on reboot; only kexec needs it handed back
+                 (development branch: 720d6ab66d9)
+    a508291c354  regulator: core: lock the vendor debug list; async probes corrupt it
+                 (development branch: 8a97f566878)
+    497b4817d3c  ARM: dts: rockchip: rk3308 rithum: name the SDIO bank's IO supply on the sdio node
+                 (development branch: d1cb5802600 + 60741904876)
 
-The last two net to eight lines in the board DTS: `vqmmc-supply =
-<&vccio_sdio>` on the sdio node and its comment. The documentation
-commits between these are not listed; `git log -- docs` has them.
+The last commit nets to eight lines in the board DTS: `vqmmc-supply =
+<&vccio_sdio>` on the sdio node and its comment. On the development
+branch it arrived as a fix carrying a synchronous `regulator-fixed`
+probe as well, and a follow-up removed that once the DT line alone
+measured 12 of 12; here it is one commit. This document is the final
+commit on `rithum-6.12`.
 
 ## 9. What survives if 6.12 is abandoned
 
@@ -1964,8 +1990,12 @@ Applies to any base newer than 6.1, whichever it is:
 
 Kept:
 
-- `rithum-6.12`: the port. `claude/kernel-6-12-port-kg1g39` is the
-  development branch with the same history.
+- `rithum-6.12`: the port, as a clean series: carry-over, stable merge,
+  the fixes in topical order, one documentation commit.
+  `claude/kernel-6-12-port-kg1g39` is the development branch, same
+  tree, full working history (eighty-odd commits, most of them this
+  document being kept current); the hashes quoted in this document are
+  its.
 - `claude/bisect-6.6`: Rockchip develop-6.6 made bootable for this board
   (queue fix, SFTL fops shift, regulator lock, RNG config, carry-overs),
   13 of 17 on WiFi before the fix, the nearest fallback base if 6.12 is
