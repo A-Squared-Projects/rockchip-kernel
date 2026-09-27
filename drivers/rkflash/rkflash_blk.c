@@ -432,16 +432,16 @@ static int nand_gc_mythread(void *arg)
 	return 0;
 }
 
-static int rkflash_blk_open(struct block_device *bdev, fmode_t mode)
+static int rkflash_blk_open(struct gendisk *disk, blk_mode_t mode)
 {
 	return 0;
 }
 
-static void rkflash_blk_release(struct gendisk *disk, fmode_t mode)
+static void rkflash_blk_release(struct gendisk *disk)
 {
 };
 
-static int rkflash_blk_ioctl(struct block_device *bdev, fmode_t mode,
+static int rkflash_blk_ioctl(struct block_device *bdev, blk_mode_t mode,
 			 unsigned int cmd,
 			 unsigned long arg)
 {
