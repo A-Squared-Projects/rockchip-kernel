@@ -1296,7 +1296,8 @@ The two halves are bisected separately:
 
   Running now: `exp-sync-fixed-regulator` (d78c27ea1a2 as 6.12.111,
   gated), twelve boots with the full dmesg captured so the io-domain
-  probe order is recorded per boot. Prediction as stated: toward 24 of
+  probe order is recorded per boot; 3 of 3 with zero errors at the
+  time of writing, against the port's 2 of 12. Prediction as stated: toward 24 of
   24 if the ordering is the mechanism; near 2 of 12 and the whole chain
   above collapses, the graded-decline reading with it.
 
@@ -1304,24 +1305,56 @@ The two halves are bisected separately:
 
   1. The one-boot confirmation from the other side: a G-instrumented
      boot of the sync image showing the io-domain never defers.
-  2. The real fix, which is not the experiment. Dropping async probe
-     from `regulator-fixed` globally is a big hammer on a shared driver
-     and would not go upstream for one board's convenience, though it
-     is acceptable in this vendor tree with a comment. The defensible
-     kernel versions are an explicit dependency: `vqmmc-supply =
-     <&vccio_sdio>` on the sdio node (correct, smaller, testable the
-     same way, but leaves io-domain and dw_mmc unordered on the
-     deferred queue), or a device link from the mmc host to the
-     io-domain. And one option outside the kernel that the loader
-     finding opens: U-Boot for this board should set VCCIO4 to 1.8 V
-     mode instead of the rk3308 default of 3.3 V, since the rail is
-     1.8 V by design. Then the hand-off is already correct, the
-     io-domain's later write is a no-op, and every kernel from 6.1 to
-     the 6.6 fallback to the port is fixed at once without touching a
-     shared driver. The U-Boot comment's warning is about boards that
-     supply 3.3 V there; this board does not. That is the fix that
-     survives every kernel decision; the kernel-side dependency is the
-     belt to its braces.
+  2. The real fix, which is not the experiment. Two layers, in
+     deployment order:
+
+     The kernel-side dependency is the fix to build and ship for the
+     port: it goes out in a rootfs update and is reversible by flashing
+     back. `vqmmc-supply = <&vccio_sdio>` on the sdio node is the
+     correct description of the hardware and makes dw_mmc defer until
+     that regulator exists, but alone it leaves the io-domain and
+     dw_mmc unordered on the deferred queue (in practice the io-domain
+     deferred at fs_initcall sits earlier in the list and is re-probed
+     synchronously while dw_mmc's re-probe goes back to the async
+     queue, which favours the right order without guaranteeing it). A
+     guaranteed order needs one of: a device link from the mmc host to
+     the io-domain (vendor DT property plus a few lines in the rockchip
+     dw_mmc glue), or keeping `regulator-fixed` synchronous in this
+     vendor tree with a comment naming the board (the experiment as
+     written; one line, exactly what 6.1 does, not upstreamable as a
+     fix for one board's convenience but acceptable in a vendor tree).
+     Ship the DT supply plus one guarantee.
+
+     The root fix is in U-Boot and is staged, not first. The write that
+     hands the kernel VCCIO4 in 3.3 V mode is in TPL, the first stage,
+     unconditional for all rk3308, and its stated purpose is protection
+     against chip damage on boards that supply 3.3 V there. Every
+     rithum variant inherits `vccio4-supply = <&vccio_sdio>` = vcc_1v8
+     from the voice-module dtsi and none overrides it (checked by
+     meta-rithum across -switch, -rs, -rsp and -bench), so VCCIO4_1V8
+     is right for the whole family by the DT. But the DT is our
+     description of the hardware, not a measurement of it, and the
+     error in the other direction risks the SoC, not a failed boot: the
+     rail wants confirming on a meter per variant before this goes in.
+     Deploying it also means replacing TPL: a bad bootchain write on
+     this board is a maskrom brick, SD boot is impossible because the
+     SD pins are muxed with UART2, and recovery is USB maskrom with
+     physical access; the field path is the live bootchain rewrite,
+     already the riskiest operation in the update tooling. So: better
+     engineering, worse thing to be wrong about, and it belongs behind
+     a per-variant rail measurement and a TPL review by whoever owns
+     the bootchain. Once in, it makes the io-domain's write a no-op and
+     immunises every later kernel against this race; the kernel-side
+     dependency then becomes belt to its braces.
+
+     Urgency: none in the field. rithum-6.1 is 24 of 24 and is what
+     ships; every fielded unit predates the async change. The whole
+     benefit accrues to the port, which is not shipping, and a fielded
+     unit would not see the U-Boot fix until its bootchain was updated
+     anyway. The honest statement is that these fix the port and
+     immunise what comes after it; 6.1 has nothing to fix and the 6.6
+     branch is a diagnostic.
+
   3. Cold boots. Every entry in the table is a warm reboot. If the
      mechanism is probe timing against the loader's hand-off, cold boot
      is where the rails and the loader's own timing differ most, and
