@@ -887,10 +887,23 @@ The two halves are bisected separately:
   That changes what a successful probe-ready revert means: restoring
   the port to about 75 percent is "back to the band", not "fixed", and
   the remaining margin is the bench's. If 6.1 really is at 100 percent
-  there are two drops after all, but the first is 6.1 to 6.6, a
-  different window (five mainline releases plus the vendor base
-  change) that has not been looked at. Twelve more 6.1 boots decide
-  which; the image is banked and it is boots, not a build.
+  there are two drops after all, but the first is 6.1 to 6.6, and that
+  window is not one the tag method opens. rithum-6.1 and the 6.6 point
+  do not sit on a line: their merge-base is a Rockchip vendor commit
+  in no tag (243363ccfdc2, on meta-rithum's full clone; this clone is
+  shallow-excluded at develop-6.1 and cannot compute it), with about
+  12k commits on the 6.1 side and 95k on the 6.6 side. A bisection
+  across the 95k is mechanically valid but every point lacks the
+  rithum stack, so each of about seventeen steps is a hand re-port for
+  one boot, against about six steps for the tag window where the
+  established drop is. If that reading ever needs acting on, the
+  method is a subsystem swap, not a bisection: 6.1's drivers/mmc
+  (132 files, about 4.5k lines each way against the 6.6 tree) onto
+  the 6.6 base or the reverse, one build per hypothesis, which fits a
+  bug that nothing short of a whole-subsystem or timing change has
+  ever moved. Twelve more 6.1 boots decide which reading holds; the
+  image is banked and it is boots, not a build. Either way the tag
+  window is the right spend first.
 
   Vehicles built and banked by meta-rithum, independent of the deploy
   directory, so any of them can start without a build: 6.1.188
@@ -905,8 +918,11 @@ The two halves are bisected separately:
   and the pwrseq probe timestamps that give the reset-pulse length);
   then `exp-revert-probe-ready`; then twelve more 6.1 boots to settle
   whether 6.1 is at 100 percent or in the band; then `.90` if the
-  revert does not move the rate. The unit is free and held for this;
-  the devkey test is deferred.
+  revert does not move the rate. The port's gate has passed and its
+  DVFS reads are being taken with cpufreq present, then its twelve
+  boots and probe-ready's twelve run unattended. Both images report
+  6.12.111, so only the VERSION_ID stamp separates them; every flash
+  gates on it.
 
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
