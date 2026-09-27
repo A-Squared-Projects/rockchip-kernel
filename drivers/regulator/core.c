@@ -46,6 +46,8 @@ static LIST_HEAD(regulator_coupler_list);
 #ifdef CONFIG_DEBUG_FS
 static DEFINE_MUTEX(regulator_debug_mutex);
 static LIST_HEAD(regulator_debug_list);
+/* Guards regulator_debug_list: regulators register from async probe workers. */
+static DEFINE_MUTEX(regulator_debug_list_mutex);
 #endif
 static bool has_full_constraints;
 
@@ -5667,6 +5669,7 @@ static void rdev_deinit_debugfs(struct regulator_dev *rdev)
 	debugfs_remove_recursive(rdev->debugfs);
 
 	mutex_lock(&regulator_debug_mutex);
+	mutex_lock(&regulator_debug_list_mutex);
 	list_for_each_entry_safe(reg_debug, n, &regulator_debug_list, list) {
 		if (reg_debug->reg->rdev == rdev) {
 			reg_debug->reg->debugfs = NULL;
@@ -5675,6 +5678,7 @@ static void rdev_deinit_debugfs(struct regulator_dev *rdev)
 			kfree(reg_debug);
 		}
 	}
+	mutex_unlock(&regulator_debug_list_mutex);
 	mutex_unlock(&regulator_debug_mutex);
 }
 
@@ -5722,7 +5726,9 @@ static void rdev_init_debugfs(struct regulator_dev *rdev)
 	}
 	reg_debug->reg = regulator;
 	mutex_lock(&regulator_debug_mutex);
+	mutex_lock(&regulator_debug_list_mutex);
 	list_add(&reg_debug->list, &regulator_debug_list);
+	mutex_unlock(&regulator_debug_list_mutex);
 	mutex_unlock(&regulator_debug_mutex);
 
 	ops = rdev->desc->ops;
