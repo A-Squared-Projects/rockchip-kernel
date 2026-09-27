@@ -637,6 +637,68 @@ The two halves are bisected separately:
   rule below, its next boot is console-attended: expected to reach
   sshd, not yet shown to.
 
+  **6.6 result: 5 of 5 clean**, plus a console-attended first-attempt
+  attach and a live check, seven clean boots and not one -110. Five is
+  not twelve (p about 0.07 under the pre-merge rate), and the attach
+  sits at 0.76 s against 1.07 s on the port, but it moves the primary
+  loss of margin into the 6.6-to-6.12.69 half, 113k commits, and out
+  of anything inherited from before 6.6. The sixth boot stranded on
+  the vendor-storage fault above (the layer's serial fallback handled
+  an empty read, not a hung one); the blob fix at 02e174bf1be removes
+  the fault itself.
+
+  The table now reads:
+
+      point                  from 6.1     rate     failures
+      6.1.188                0            12 of 12 none
+      6.6.89                 95k          5 of 5   none
+      6.12.69 pre-merge      209k         7 of 12  five four-retry
+      6.12.111 port          + 43 tags    1 of 6   five four-retry
+
+  **What the dumps never covered.** vdd_core on this board is a PWM
+  regulator on pwm0 (`pwms = <&pwm0 0 5000 1>`, 827 to 1340 mV,
+  init 1015 mV, inverted polarity), and it is also vdd_log: the SoC's
+  logic rail, which sets the timing of the dw_mmc IP, the CRU dividers
+  and the core side of the I/O cells. cpufreq moves it with every OPP
+  change (950 mV at 408 and 600 MHz, 1025 down to 950 at 816 by
+  leakage bin, 1125 at 1008). Neither the PWM duty nor the regulator
+  voltage was in any comparison, and the one clock difference ever
+  seen between 6.1 and the port, `clk_pwm0` enabled once against
+  twice, was dismissed as cosmetic. Everything that changed between
+  the passing and failing kernels in this area is real: the Rockchip
+  cpufreq driver went from a module_init to a platform driver with an
+  early init (so when the first OPP transition happens moved), the
+  OPP voltage selection code changed (the PVTM selection result is no
+  longer even printed), pwm-regulator gained a boot-on state fix, the
+  PWM core was rewritten, and the stable span carries "regulator:
+  core: clamp voltage constraints before applying apply_uV"
+  (93b078e5942), which sits exactly on the path that applies the
+  1015 mV init value to a continuous-range PWM regulator. A lower
+  logic voltage, or a voltage step landing on the switch, is a
+  margin loss that is independent of bus rate and timing mode, which
+  is the shape of every result so far. The three kernels that pass
+  (6.1; 6.6, whose attach at 0.76 s precedes any cpufreq activity;
+  the port with the transaction pushed past 1.2 s) and the ones that
+  fail differ in exactly the state cpufreq owns.
+
+  Two tests, one of them a read. Read, on 6.1, 6.6 and the port,
+  steady state after boot: the vdd_core regulator's `microvolts`,
+  `/sys/kernel/debug/pwm` for pwm0, the raw PWM0 registers at
+  0xff180000 (0x04 period, 0x08 duty, 0x0c ctrl), and cpufreq's
+  governor, current frequency, `stats/time_in_state` and
+  `stats/total_trans`; plus the `initcall_debug` timestamps of
+  `pwm-regulator`, `cpufreq-dt` and `rockchip-cpufreq` against the
+  SDIO attach, which the existing G captures already hold; plus the
+  dmesg lines with `volt-sel`, `pvtm`, `idc` or `leakage`. Any
+  difference in the steady voltage or the duty is the answer; if
+  those match, the transition timing is. The build:
+  `claude/exp-no-cpufreq`, the port with `CONFIG_CPU_FREQ` off, so the
+  CPU stays at the loader's frequency and voltage. Twelve boots at
+  6.1's rate says DVFS eats the margin, and the fix is then in the
+  OPP voltages or the transition timing for this board, not in SDIO.
+  At the bench: a meter on vdd_core on each kernel, and a scope on it
+  through the 0.9 to 1.3 s window on the port.
+
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
   unit until it has booted somewhere: a boot on the layer's QEMU
