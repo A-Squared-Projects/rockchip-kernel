@@ -533,15 +533,31 @@ The two halves are bisected separately:
   `system_percpu_wq`, the regulator core's constraint clamp and
   freezable init work, cpufreq core fixes, and the pinctrl-rockchip
   pin-count reset on re-probe.
-- The 6.1 to develop-6.12 half, by Rockchip's develop-6.6 (6.6.89).
-  Its voice-module and mainboard dtsi are the same as 6.1's apart from
-  the gpiod property renames, and its rk3308.dtsi differs by two cache
-  properties, so a WiFi rate there is commensurable with the three
-  above. It needs a small block-glue port of rkflash (the vendor copy
-  there still has the pre-6.5 signatures), the rithum boards, the
-  defconfig, and the decompressor and SFTL link fixes; the codec and
-  the old gpio driver are already there, and a WiFi-only image needs
-  no display.
+- A control for the design above: the pre-merge tree differs from the
+  port not only by the stable merge but by the post-merge rithum
+  commits (vendor codec and its DT node, panel bit-bang, GT911 guard,
+  8250 diagnostic, fbdev ops, OP-TEE gate, the four gpio fixes).
+  `claude/bisect-pre-merge-plus-rithum` (08bc7102c28) is the pre-merge
+  tree with all of them and no stable, so its only difference from the
+  port is the stable merge. Twelve boots at about 7 of 12 say those
+  commits are neutral and the stable bisection stands; a rate near the
+  port's says one of them matters and the bisection moves there.
+- The 6.1 to develop-6.12 half, by Rockchip's develop-6.6 (6.6.89):
+  `claude/bisect-6.6` (fbd75edae26), which is develop-6.6 plus the low
+  ZRELADDR, the decompressor FORTIFY guard, the SFTL link stub and
+  thumb shims, the uart4 label fix, the rithum boards, the defconfig
+  re-canonicalised for 6.6 (`CONFIG_DEBUG_WX`, and the GT911 driver
+  left out because develop-6.6's copy does not compile there), the
+  OP-TEE reboot gate, and a block-glue signature port for rkflash
+  (develop-6.6 still carries the pre-6.5 `fmode_t` signatures). The
+  vendor codec and the pre-conversion gpio driver are already there.
+  It builds with clang (zImage and DTBs), and the compiled Pro DTB
+  matches the 6.12 one node for node on the SDIO host, `sdio-pwrseq`,
+  `wireless-wlan` and `io-domains`; the whole-DTB difference is the
+  codec node's spelling, the OTP node's names and the gpio-ranges the
+  6.6 driver does not need. A WiFi rate on it is therefore
+  commensurable with the three points above. No display on this
+  image: the panel bit-bang path is not carried.
 
 Until that is done, the port ships without WiFi being reliable, or it
 does not ship. A and C are not acceptable substitutes: they relocate
