@@ -801,8 +801,9 @@ The two halves are bisected separately:
   `d25dadf7423`, `962eae1f30e`). `552b9077733` (mmc fixed driver type)
   touches only the eMMC path and is out. A single-commit test is
   prepared alongside the tag bisection: `claude/exp-revert-probe-ready`
-  is the port with `88e338bd9b6` reverted, one commit, byte-identical
-  otherwise. If the port's twelve boots hold at its rate, .90 decides
+  (d9e24787603) is the port with `88e338bd9b6` and its kernel-doc
+  follow-up `c5a22b92ed4` reverted, byte-identical otherwise; it builds
+  to a zImage and is expected to reach sshd. If the port's twelve boots hold at its rate, .90 decides
   which side of v6.12.86 the fault sits, and the revert build decides
   whether that commit alone carries it.
 
