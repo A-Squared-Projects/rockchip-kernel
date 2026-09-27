@@ -486,6 +486,30 @@ programme:
 3. Repeated real power cycles on each image. One cold boot of E passed
    first time, which at E's 1-in-6 warm rate is what chance gives once.
 
+Two software bisection points exist alongside the bench, and they are
+cheaper than a scope session, so they should be run first:
+
+- The branch before the v6.12.111 stable merge. Every hardware boot so
+  far has been post-merge, so the merge (6.12.69 to 6.12.111, 238
+  files in the mmc, clk, soc, pinctrl, gpio, regulator, driver core,
+  scheduler, workqueue and ARM mm areas) has never been separated from
+  the port itself. A bootable pre-merge tree is `f7ee4a0347b` plus four
+  cherry-picks that apply cleanly in that order: `2d0ceae0721` (the
+  decompressor links with GCC), `161e2f8fefc` (the SFTL blobs link),
+  `47227328c1f` and `c63830b0f5e` (pins work, which WL_REG_ON needs).
+  Six boots. 6 of 6 puts the fault inside the stable merge and it can
+  be bisected commit by commit; 1 of 6 clears the merge and points at
+  develop-6.12 itself.
+- Rockchip's develop-6.6 (6.6.89). It carries the vendor rk3308 codec,
+  the aarch32 rk3308 boards, the pre-conversion gpio-rockchip, and the
+  same sdio node; rkflash there still uses `fmode_t` and
+  `blk_mq_init_queue`, so it needs a smaller version of the block port
+  than 6.12 did. Panel bit-bang and the GT911 config fix would need
+  carrying, but a WiFi-only test image does not need the display. If
+  pre-merge fails, a 6.6 boot splits the 6.1-to-6.12 span in half: a
+  pass there bounds the regression to 6.6-to-6.12 vendor development
+  and mainline changes, a fail bounds it to 6.1-to-6.6.
+
 Until that is done, the port ships without WiFi being reliable, or it
 does not ship. A and C are not acceptable substitutes: they relocate
 the transaction and hide the fault.
