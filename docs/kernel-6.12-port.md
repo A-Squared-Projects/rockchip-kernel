@@ -720,9 +720,9 @@ The two halves are bisected separately:
   moved from the DT's 1015 mV to the OPP voltage of whatever frequency
   the loader left the CPU at, using the voltage column the OPP
   selection code picks. 6.1 printed `pvtm-volt-sel=4`; the port prints
-  that only at debug level, and its OPP selection code differs (the
-  leakage path was reworked and an OTP-based table adjustment exists
-  that 6.1 does not have). If the port lands on a lower column, or
+  that only at debug level, and its OPP selection code differs from
+  6.1's by about a hundred lines in the leakage, temperature and
+  PVTM paths (the OTP-based table adjustment exists in both). If the port lands on a lower column, or
   adjusts the table, the switch runs at a lower core voltage on every
   boot, which is a margin loss of exactly the observed shape. Reads
   that settle it, no build: `/sys/kernel/debug/opp/cpu0/opp:*/supply-0/
