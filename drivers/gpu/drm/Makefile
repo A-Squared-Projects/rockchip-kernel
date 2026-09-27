@@ -75,7 +75,6 @@ drm-y := \
 	drm_vma_manager.o \
 	drm_writeback.o
 drm-$(CONFIG_DRM_EDID) += drm_edid.o
-drm-$(CONFIG_DRM_LIB_RANDOM) += lib/drm_random.o
 drm-$(CONFIG_COMPAT) += drm_ioc32.o
 drm-$(CONFIG_DRM_PANEL) += drm_panel.o
 drm-$(CONFIG_OF) += drm_of.o

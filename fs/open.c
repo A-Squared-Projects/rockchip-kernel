@@ -349,14 +349,12 @@ EXPORT_SYMBOL_GPL(vfs_fallocate);
 
 int ksys_fallocate(int fd, int mode, loff_t offset, loff_t len)
 {
-	struct fd f = fdget(fd);
-	int error = -EBADF;
+	CLASS(fd, f)(fd);
 
-	if (fd_file(f)) {
-		error = vfs_fallocate(fd_file(f), mode, offset, len);
-		fdput(f);
-	}
-	return error;
+	if (fd_empty(f))
+		return -EBADF;
+
+	return vfs_fallocate(fd_file(f), mode, offset, len);
 }
 
 SYSCALL_DEFINE4(fallocate, int, fd, int, mode, loff_t, offset, loff_t, len)
@@ -671,14 +669,12 @@ int vfs_fchmod(struct file *file, umode_t mode)
 
 SYSCALL_DEFINE2(fchmod, unsigned int, fd, umode_t, mode)
 {
-	struct fd f = fdget(fd);
-	int err = -EBADF;
+	CLASS(fd, f)(fd);
 
-	if (fd_file(f)) {
-		err = vfs_fchmod(fd_file(f), mode);
-		fdput(f);
-	}
-	return err;
+	if (fd_empty(f))
+		return -EBADF;
+
+	return vfs_fchmod(fd_file(f), mode);
 }
 
 static int do_fchmodat(int dfd, const char __user *filename, umode_t mode,
@@ -865,14 +861,12 @@ int vfs_fchown(struct file *file, uid_t user, gid_t group)
 
 int ksys_fchown(unsigned int fd, uid_t user, gid_t group)
 {
-	struct fd f = fdget(fd);
-	int error = -EBADF;
+	CLASS(fd, f)(fd);
 
-	if (fd_file(f)) {
-		error = vfs_fchown(fd_file(f), user, group);
-		fdput(f);
-	}
-	return error;
+	if (fd_empty(f))
+		return -EBADF;
+
+	return vfs_fchown(fd_file(f), user, group);
 }
 
 SYSCALL_DEFINE3(fchown, unsigned int, fd, uid_t, user, gid_t, group)
@@ -918,7 +912,7 @@ static int do_dentry_open(struct file *f,
 	f->f_sb_err = file_sample_sb_err(f);
 
 	if (unlikely(f->f_flags & O_PATH)) {
-		f->f_mode = FMODE_PATH | FMODE_OPENED;
+		f->f_mode = FMODE_PATH | FMODE_OPENED | FMODE_NONOTIFY;
 		f->f_op = &empty_fops;
 		return 0;
 	}
@@ -943,6 +937,16 @@ static int do_dentry_open(struct file *f,
 	}
 
 	error = security_file_open(f);
+	if (error)
+		goto cleanup_all;
+
+	/*
+	 * Set FMODE_NONOTIFY_* bits according to existing permission watches.
+	 * If FMODE_NONOTIFY was already set for an fanotify fd, this doesn't
+	 * change anything.
+	 */
+	file_set_fsnotify_mode(f);
+	error = fsnotify_open_perm(f);
 	if (error)
 		goto cleanup_all;
 

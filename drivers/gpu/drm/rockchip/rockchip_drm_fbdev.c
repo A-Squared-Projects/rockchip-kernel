@@ -43,7 +43,7 @@ static int rockchip_drm_fbdev_create(struct drm_fb_helper *helper,
 	struct drm_framebuffer *fb;
 	unsigned int bytes_per_pixel;
 	unsigned long offset;
-	struct fb_info *fbi;
+	struct fb_info *fbi = helper->info;
 	size_t size;
 	int ret;
 
@@ -62,13 +62,6 @@ static int rockchip_drm_fbdev_create(struct drm_fb_helper *helper,
 		return -ENOMEM;
 
 	private->fbdev_bo = &rk_obj->base;
-
-	fbi = drm_fb_helper_alloc_info(helper);
-	if (IS_ERR(fbi)) {
-		DRM_DEV_ERROR(dev->dev, "Failed to create framebuffer info.\n");
-		ret = PTR_ERR(fbi);
-		goto out;
-	}
 
 	helper->fb = rockchip_drm_framebuffer_init(dev, &mode_cmd,
 						   private->fbdev_bo);

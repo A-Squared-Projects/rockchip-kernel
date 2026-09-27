@@ -2507,10 +2507,7 @@ static netdev_tx_t idpf_tx_splitq_frame(struct sk_buff *skb,
 
 		tx_params.dtype = IDPF_TX_DESC_DTYPE_FLEX_FLOW_SCHE;
 		tx_params.eop_cmd = IDPF_TXD_FLEX_FLOW_CMD_EOP;
-		/* Set the RE bit to periodically "clean" the descriptor ring.
-		 * MIN_GAP is set to MIN_RING size to ensure it will be set at
-		 * least once each time around the ring.
-		 */
+		/* Set the RE bit periodically to "clean" the descriptor ring */
 		if (idpf_tx_splitq_need_re(tx_q)) {
 			tx_params.eop_cmd |= IDPF_TXD_FLEX_FLOW_CMD_RE;
 			tx_q->txq_grp->num_completions_pending++;
@@ -2711,6 +2708,7 @@ static int idpf_rx_rsc(struct idpf_rx_queue *rxq, struct sk_buff *skb,
 		       struct libeth_rx_pt decoded)
 {
 	u16 rsc_segments, rsc_seg_len;
+	u16 l3_start = 0;
 	bool ipv4, ipv6;
 	int len;
 
@@ -2733,7 +2731,10 @@ static int idpf_rx_rsc(struct idpf_rx_queue *rxq, struct sk_buff *skb,
 	NAPI_GRO_CB(skb)->count = rsc_segments;
 	skb_shinfo(skb)->gso_size = rsc_seg_len;
 
-	skb_reset_network_header(skb);
+	if (unlikely(eth_type_vlan(skb->protocol)))
+		l3_start = VLAN_HLEN;
+
+	skb_set_network_header(skb, l3_start);
 
 	if (ipv4) {
 		struct iphdr *ipv4h = ip_hdr(skb);
@@ -2741,7 +2742,7 @@ static int idpf_rx_rsc(struct idpf_rx_queue *rxq, struct sk_buff *skb,
 		skb_shinfo(skb)->gso_type = SKB_GSO_TCPV4;
 
 		/* Reset and set transport header offset in skb */
-		skb_set_transport_header(skb, sizeof(struct iphdr));
+		skb_set_transport_header(skb, l3_start + sizeof(struct iphdr));
 		len = skb->len - skb_transport_offset(skb);
 
 		/* Compute the TCP pseudo header checksum*/
@@ -2751,7 +2752,7 @@ static int idpf_rx_rsc(struct idpf_rx_queue *rxq, struct sk_buff *skb,
 		struct ipv6hdr *ipv6h = ipv6_hdr(skb);
 
 		skb_shinfo(skb)->gso_type = SKB_GSO_TCPV6;
-		skb_set_transport_header(skb, sizeof(struct ipv6hdr));
+		skb_set_transport_header(skb, l3_start + sizeof(struct ipv6hdr));
 		len = skb->len - skb_transport_offset(skb);
 		tcp_hdr(skb)->check =
 			~tcp_v6_check(len, &ipv6h->saddr, &ipv6h->daddr, 0);
@@ -3477,7 +3478,7 @@ static int idpf_vport_intr_req_irq(struct idpf_vport *vport)
 			continue;
 
 		name = kasprintf(GFP_KERNEL, "%s-%s-%s-%d", drv_name, if_name,
-				 vec_name, vidx);
+				 vec_name, vector);
 
 		err = request_irq(irq_num, idpf_vport_intr_clean_queues, 0,
 				  name, q_vector);
@@ -4059,7 +4060,7 @@ int idpf_config_rss(struct idpf_vport *vport)
  * idpf_fill_dflt_rss_lut - Fill the indirection table with the default values
  * @vport: virtual port structure
  */
-static void idpf_fill_dflt_rss_lut(struct idpf_vport *vport)
+void idpf_fill_dflt_rss_lut(struct idpf_vport *vport)
 {
 	struct idpf_adapter *adapter = vport->adapter;
 	u16 num_active_rxq = vport->num_rxq;
@@ -4068,57 +4069,47 @@ static void idpf_fill_dflt_rss_lut(struct idpf_vport *vport)
 
 	rss_data = &adapter->vport_config[vport->idx]->user_config.rss_data;
 
-	for (i = 0; i < rss_data->rss_lut_size; i++) {
+	for (i = 0; i < rss_data->rss_lut_size; i++)
 		rss_data->rss_lut[i] = i % num_active_rxq;
-		rss_data->cached_lut[i] = rss_data->rss_lut[i];
-	}
 }
 
 /**
- * idpf_init_rss - Allocate and initialize RSS resources
+ * idpf_init_rss_lut - Allocate and initialize RSS LUT
  * @vport: virtual port
  *
- * Return 0 on success, negative on failure
+ * Return: 0 on success, negative on failure
  */
-int idpf_init_rss(struct idpf_vport *vport)
+int idpf_init_rss_lut(struct idpf_vport *vport)
 {
 	struct idpf_adapter *adapter = vport->adapter;
 	struct idpf_rss_data *rss_data;
-	u32 lut_size;
 
 	rss_data = &adapter->vport_config[vport->idx]->user_config.rss_data;
+	if (!rss_data->rss_lut) {
+		u32 lut_size;
 
-	lut_size = rss_data->rss_lut_size * sizeof(u32);
-	rss_data->rss_lut = kzalloc(lut_size, GFP_KERNEL);
-	if (!rss_data->rss_lut)
-		return -ENOMEM;
-
-	rss_data->cached_lut = kzalloc(lut_size, GFP_KERNEL);
-	if (!rss_data->cached_lut) {
-		kfree(rss_data->rss_lut);
-		rss_data->rss_lut = NULL;
-
-		return -ENOMEM;
+		lut_size = rss_data->rss_lut_size * sizeof(u32);
+		rss_data->rss_lut = kzalloc(lut_size, GFP_KERNEL);
+		if (!rss_data->rss_lut)
+			return -ENOMEM;
 	}
 
 	/* Fill the default RSS lut values */
 	idpf_fill_dflt_rss_lut(vport);
 
-	return idpf_config_rss(vport);
+	return 0;
 }
 
 /**
- * idpf_deinit_rss - Release RSS resources
+ * idpf_deinit_rss_lut - Release RSS LUT
  * @vport: virtual port
  */
-void idpf_deinit_rss(struct idpf_vport *vport)
+void idpf_deinit_rss_lut(struct idpf_vport *vport)
 {
 	struct idpf_adapter *adapter = vport->adapter;
 	struct idpf_rss_data *rss_data;
 
 	rss_data = &adapter->vport_config[vport->idx]->user_config.rss_data;
-	kfree(rss_data->cached_lut);
-	rss_data->cached_lut = NULL;
 	kfree(rss_data->rss_lut);
 	rss_data->rss_lut = NULL;
 }

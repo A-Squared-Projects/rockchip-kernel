@@ -418,7 +418,6 @@ int xe_vm_validate_rebind(struct xe_vm *vm, struct drm_exec *exec,
 			  unsigned int num_fences)
 {
 	struct drm_gem_object *obj;
-	unsigned long index;
 	int ret;
 
 	do {
@@ -431,7 +430,7 @@ int xe_vm_validate_rebind(struct xe_vm *vm, struct drm_exec *exec,
 			return ret;
 	} while (!list_empty(&vm->gpuvm.evict.list));
 
-	drm_exec_for_each_locked_object(exec, index, obj) {
+	drm_exec_for_each_locked_object(exec, obj) {
 		ret = dma_resv_reserve_fences(obj->resv, num_fences);
 		if (ret)
 			return ret;
@@ -2187,7 +2186,6 @@ static int xe_vma_op_commit(struct xe_vm *vm, struct xe_vma_op *op)
 			if (!err && op->remap.skip_prev) {
 				op->remap.prev->tile_present =
 					tile_present;
-				op->remap.prev = NULL;
 			}
 		}
 		if (op->remap.next) {
@@ -2197,11 +2195,13 @@ static int xe_vma_op_commit(struct xe_vm *vm, struct xe_vma_op *op)
 			if (!err && op->remap.skip_next) {
 				op->remap.next->tile_present =
 					tile_present;
-				op->remap.next = NULL;
 			}
 		}
 
-		/* Adjust for partial unbind after removin VMA from VM */
+		/*
+		 * Adjust for partial unbind after removing VMA from VM. In case
+		 * of unwind we might need to undo this later.
+		 */
 		if (!err) {
 			op->base.remap.unmap->va->va.addr = op->remap.start;
 			op->base.remap.unmap->va->va.range = op->remap.range;
@@ -2273,6 +2273,8 @@ static int vm_bind_ioctl_ops_parse(struct xe_vm *vm, struct drm_gpuva_ops *ops,
 
 			op->remap.start = xe_vma_start(old);
 			op->remap.range = xe_vma_size(old);
+			op->remap.old_start = op->remap.start;
+			op->remap.old_range = op->remap.range;
 
 			if (op->base.remap.prev) {
 				flags |= op->base.remap.unmap->va->flags &
@@ -2421,8 +2423,19 @@ static void xe_vma_op_unwind(struct xe_vm *vm, struct xe_vma_op *op,
 			down_read(&vm->userptr.notifier_lock);
 			vma->gpuva.flags &= ~XE_VMA_DESTROYED;
 			up_read(&vm->userptr.notifier_lock);
-			if (post_commit)
+			if (post_commit) {
+				/*
+				 * Restore the old va range, in case of the
+				 * prev/next skip optimisation. Otherwise what
+				 * we re-insert here could be smaller than the
+				 * original range.
+				 */
+				op->base.remap.unmap->va->va.addr =
+					op->remap.old_start;
+				op->base.remap.unmap->va->va.range =
+					op->remap.old_range;
 				xe_vm_insert_vma(vm, vma);
+			}
 		}
 		break;
 	}

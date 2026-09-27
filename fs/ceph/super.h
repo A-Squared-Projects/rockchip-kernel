@@ -104,14 +104,26 @@ struct ceph_mount_options {
 	struct fscrypt_dummy_policy dummy_enc_policy;
 };
 
+#define CEPH_NAMESPACE_WILDCARD		"*"
+
+static inline bool ceph_namespace_match(const char *pattern,
+					const char *target)
+{
+	if (!pattern || !pattern[0] ||
+	    !strcmp(pattern, CEPH_NAMESPACE_WILDCARD))
+		return true;
+
+	return !strcmp(pattern, target);
+}
+
 /*
  * Check if the mds namespace in ceph_mount_options matches
  * the passed in namespace string. First time match (when
  * ->mds_namespace is NULL) is treated specially, since
  * ->mds_namespace needs to be initialized by the caller.
  */
-static inline int namespace_equals(struct ceph_mount_options *fsopt,
-				   const char *namespace, size_t len)
+static inline bool namespace_equals(struct ceph_mount_options *fsopt,
+				    const char *namespace, size_t len)
 {
 	return !(fsopt->mds_namespace &&
 		 (strlen(fsopt->mds_namespace) != len ||
@@ -658,6 +670,10 @@ static inline struct inode *ceph_find_inode(struct super_block *sb,
 #define CEPH_I_SHUTDOWN		(1 << 13) /* inode is no longer usable */
 #define CEPH_I_ASYNC_CHECK_CAPS	(1 << 14) /* check caps immediately after async
 					     creating finishes */
+#define CEPH_I_FLUSH_FORCE	(1 << 15) /* a revoke's response was deferred;
+					   * force a cap message to the MDS once
+					   * the deferred work completes
+					   */
 
 /*
  * Masks of ceph inode work.
@@ -810,7 +826,6 @@ extern int __ceph_mark_dirty_caps(struct ceph_inode_info *ci, int mask,
 
 extern int __ceph_caps_revoking_other(struct ceph_inode_info *ci,
 				      struct ceph_cap *ocap, int mask);
-extern int ceph_caps_revoking(struct ceph_inode_info *ci, int mask);
 extern int __ceph_caps_used(struct ceph_inode_info *ci);
 
 static inline bool __ceph_is_file_opened(struct ceph_inode_info *ci)

@@ -45,6 +45,7 @@
 
 static void allow_barrier(struct r1conf *conf, sector_t sector_nr);
 static void lower_barrier(struct r1conf *conf, sector_t sector_nr);
+static void raid1_free(struct mddev *mddev, void *priv);
 
 #define RAID_1_10_NAME "raid1"
 #include "raid1-10.c"
@@ -60,7 +61,7 @@ static int check_and_add_serial(struct md_rdev *rdev, struct r1bio *r1_bio,
 	unsigned long flags;
 	int ret = 0;
 	sector_t lo = r1_bio->sector;
-	sector_t hi = lo + r1_bio->sectors;
+	sector_t hi = lo + r1_bio->sectors - 1;
 	struct serial_in_rdev *serial = &rdev->serial[idx];
 
 	spin_lock_irqsave(&serial->serial_lock, flags);
@@ -452,7 +453,7 @@ static void raid1_end_write_request(struct bio *bio)
 	int mirror = find_bio_disk(r1_bio, bio);
 	struct md_rdev *rdev = conf->mirrors[mirror].rdev;
 	sector_t lo = r1_bio->sector;
-	sector_t hi = r1_bio->sector + r1_bio->sectors;
+	sector_t hi = r1_bio->sector + r1_bio->sectors - 1;
 	bool ignore_error = !raid1_should_handle_error(bio) ||
 		(bio->bi_status && bio_op(bio) == REQ_OP_DISCARD);
 
@@ -541,7 +542,7 @@ static void raid1_end_write_request(struct bio *bio)
 				call_bio_endio(r1_bio);
 			}
 		}
-	} else if (rdev->mddev->serialize_policy)
+	} else if (test_bit(MD_SERIALIZE_POLICY, &rdev->mddev->flags))
 		remove_serial(rdev, lo, hi);
 	if (r1_bio->bios[mirror] == NULL)
 		rdev_dec_pending(rdev, conf->mddev);
@@ -1334,6 +1335,12 @@ static void raid1_read_request(struct mddev *mddev, struct bio *bio,
 	if (!wait_read_barrier(conf, bio->bi_iter.bi_sector,
 				bio->bi_opf & REQ_NOWAIT)) {
 		bio_wouldblock_error(bio);
+
+		if (r1bio_existed) {
+			set_bit(R1BIO_Returned, &r1_bio->state);
+			raid_end_bio_io(r1_bio);
+		}
+
 		return;
 	}
 
@@ -1630,7 +1637,7 @@ static void raid1_write_request(struct mddev *mddev, struct bio *bio,
 			mbio = bio_alloc_clone(rdev->bdev, bio, GFP_NOIO,
 					       &mddev->bio_set);
 
-			if (mddev->serialize_policy)
+			if (test_bit(MD_SERIALIZE_POLICY, &mddev->flags))
 				wait_for_serialization(rdev, r1_bio);
 		}
 
@@ -1734,7 +1741,7 @@ static void raid1_status(struct seq_file *seq, struct mddev *mddev)
  *	- &mddev->degraded is bumped.
  *
  * @rdev is marked as &Faulty excluding case when array is failed and
- * &mddev->fail_last_dev is off.
+ * MD_FAILLAST_DEV is not set.
  */
 static void raid1_error(struct mddev *mddev, struct md_rdev *rdev)
 {
@@ -1747,7 +1754,7 @@ static void raid1_error(struct mddev *mddev, struct md_rdev *rdev)
 	    (conf->raid_disks - mddev->degraded) == 1) {
 		set_bit(MD_BROKEN, &mddev->flags);
 
-		if (!mddev->fail_last_dev) {
+		if (!test_bit(MD_FAILLAST_DEV, &mddev->flags)) {
 			conf->recovery_disabled = mddev->recovery_disabled;
 			spin_unlock_irqrestore(&conf->device_lock, flags);
 			return;
@@ -2808,7 +2815,7 @@ static sector_t raid1_sync_request(struct mddev *mddev, sector_t sector_nr,
 	}
 
 	if (mddev->bitmap == NULL &&
-	    mddev->recovery_cp == MaxSector &&
+	    mddev->resync_offset == MaxSector &&
 	    !test_bit(MD_RECOVERY_REQUESTED, &mddev->recovery) &&
 	    conf->fullsync == 0) {
 		*skipped = 1;
@@ -3245,8 +3252,12 @@ static int raid1_run(struct mddev *mddev)
 
 	if (!mddev_is_dm(mddev)) {
 		ret = raid1_set_limits(mddev);
-		if (ret)
+		if (ret) {
+			md_unregister_thread(mddev, &conf->thread);
+			if (!mddev->private)
+				raid1_free(mddev, conf);
 			return ret;
+		}
 	}
 
 	mddev->degraded = 0;
@@ -3260,13 +3271,15 @@ static int raid1_run(struct mddev *mddev)
 	 */
 	if (conf->raid_disks - mddev->degraded < 1) {
 		md_unregister_thread(mddev, &conf->thread);
+		if (!mddev->private)
+			raid1_free(mddev, conf);
 		return -EINVAL;
 	}
 
 	if (conf->raid_disks - mddev->degraded == 1)
-		mddev->recovery_cp = MaxSector;
+		mddev->resync_offset = MaxSector;
 
-	if (mddev->recovery_cp != MaxSector)
+	if (mddev->resync_offset != MaxSector)
 		pr_info("md/raid1:%s: not clean -- starting background reconstruction\n",
 			mdname(mddev));
 	pr_info("md/raid1:%s: active with %d out of %d mirrors\n",
@@ -3327,8 +3340,8 @@ static int raid1_resize(struct mddev *mddev, sector_t sectors)
 
 	md_set_array_sectors(mddev, newsize);
 	if (sectors > mddev->dev_sectors &&
-	    mddev->recovery_cp > mddev->dev_sectors) {
-		mddev->recovery_cp = mddev->dev_sectors;
+	    mddev->resync_offset > mddev->dev_sectors) {
+		mddev->resync_offset = mddev->dev_sectors;
 		set_bit(MD_RECOVERY_NEEDED, &mddev->recovery);
 	}
 	mddev->dev_sectors = sectors;
@@ -3469,8 +3482,6 @@ static void *raid1_takeover(struct mddev *mddev)
 		mddev->new_chunk_sectors = 0;
 		conf = setup_conf(mddev);
 		if (!IS_ERR(conf)) {
-			/* Array must appear to be quiesced */
-			conf->array_frozen = 1;
 			mddev_clear_unsupported_flags(mddev,
 				UNSUPPORTED_MDDEV_FLAGS);
 		}

@@ -299,6 +299,7 @@ void evsel__init(struct evsel *evsel,
 	evsel->pmu_name      = NULL;
 	evsel->group_pmu_name = NULL;
 	evsel->skippable     = false;
+	evsel->alternate_hw_config = PERF_COUNT_HW_MAX;
 }
 
 struct evsel *evsel__new_idx(struct perf_event_attr *attr, int idx)
@@ -444,6 +445,8 @@ struct evsel *evsel__clone(struct evsel *orig)
 
 	if (evsel__copy_config_terms(evsel, orig) < 0)
 		goto out_err;
+
+	evsel->alternate_hw_config = orig->alternate_hw_config;
 
 	return evsel;
 
@@ -1854,6 +1857,24 @@ static int evsel__read_tool(struct evsel *evsel, int cpu_map_idx, int thread)
 	count->ena    = count->run = delta_start;
 	count->lost   = 0;
 	return 0;
+}
+
+bool __evsel__match(const struct evsel *evsel, u32 type, u64 config)
+{
+
+	u32 e_type = evsel->core.attr.type;
+	u64 e_config = evsel->core.attr.config;
+
+	if (e_type != type) {
+		return type == PERF_TYPE_HARDWARE && evsel->pmu && evsel->pmu->is_core &&
+			evsel->alternate_hw_config == config;
+	}
+
+	if ((type == PERF_TYPE_HARDWARE || type == PERF_TYPE_HW_CACHE) &&
+	    perf_pmus__supports_extended_type())
+		e_config &= PERF_HW_EVENT_MASK;
+
+	return e_config == config;
 }
 
 int evsel__read_counter(struct evsel *evsel, int cpu_map_idx, int thread)
@@ -3410,6 +3431,10 @@ int evsel__open_strerror(struct evsel *evsel, struct target *target,
 			return scnprintf(msg, size, "%s",
 	"No hardware sampling interrupt available.\n");
 #endif
+		if (!target__has_cpu(target))
+			return scnprintf(msg, size,
+	"Unsupported event (%s) in per-thread mode, enable system wide with '-a'.",
+					evsel__name(evsel));
 		break;
 	case EBUSY:
 		if (find_process("oprofiled"))

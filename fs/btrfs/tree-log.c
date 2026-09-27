@@ -4407,7 +4407,7 @@ static int log_csums(struct btrfs_trans_handle *trans,
 	 * file which happens to refer to the same extent as well. Such races
 	 * can leave checksum items in the log with overlapping ranges.
 	 */
-	ret = lock_extent(&log_root->log_csum_range, sums->logical, lock_end,
+	ret = btrfs_lock_extent(&log_root->log_csum_range, sums->logical, lock_end,
 			  &cached_state);
 	if (ret)
 		return ret;
@@ -4424,7 +4424,7 @@ static int log_csums(struct btrfs_trans_handle *trans,
 	if (!ret)
 		ret = btrfs_csum_file_blocks(trans, log_root, sums);
 
-	unlock_extent(&log_root->log_csum_range, sums->logical, lock_end,
+	btrfs_unlock_extent(&log_root->log_csum_range, sums->logical, lock_end,
 		      &cached_state);
 
 	return ret;
@@ -4765,7 +4765,7 @@ static int log_extent_csums(struct btrfs_trans_handle *trans,
 	}
 
 	/* block start is already adjusted for the file extent offset. */
-	block_start = extent_map_block_start(em);
+	block_start = btrfs_extent_map_block_start(em);
 	csum_root = btrfs_csum_root(trans->fs_info, block_start);
 	ret = btrfs_lookup_csums_list(csum_root, block_start + csum_offset,
 				      block_start + csum_offset + csum_len - 1,
@@ -4800,7 +4800,7 @@ static int log_one_extent(struct btrfs_trans_handle *trans,
 	struct btrfs_key key;
 	enum btrfs_compression_type compress_type;
 	u64 extent_offset = em->offset;
-	u64 block_start = extent_map_block_start(em);
+	u64 block_start = btrfs_extent_map_block_start(em);
 	u64 block_len;
 	int ret;
 
@@ -5066,7 +5066,7 @@ process:
 		 */
 		if (ret) {
 			clear_em_logging(inode, em);
-			free_extent_map(em);
+			btrfs_free_extent_map(em);
 			continue;
 		}
 
@@ -5075,7 +5075,7 @@ process:
 		ret = log_one_extent(trans, inode, em, path, ctx);
 		write_lock(&tree->lock);
 		clear_em_logging(inode, em);
-		free_extent_map(em);
+		btrfs_free_extent_map(em);
 	}
 	WARN_ON(!list_empty(&extents));
 	write_unlock(&tree->lock);
@@ -5886,6 +5886,7 @@ static int log_conflicting_inodes(struct btrfs_trans_handle *trans,
 				  struct btrfs_root *root,
 				  struct btrfs_log_ctx *ctx)
 {
+	const bool orig_log_new_dentries = ctx->log_new_dentries;
 	int ret = 0;
 
 	/*
@@ -5947,7 +5948,11 @@ static int log_conflicting_inodes(struct btrfs_trans_handle *trans,
 			 * dir index key range logged for the directory. So we
 			 * must make sure the deletion is recorded.
 			 */
+			ctx->log_new_dentries = false;
 			ret = btrfs_log_inode(trans, inode, LOG_INODE_ALL, ctx);
+			if (!ret && ctx->log_new_dentries)
+				ret = log_new_dir_dentries(trans, inode, ctx);
+
 			btrfs_add_delayed_iput(inode);
 			if (ret)
 				break;
@@ -5982,6 +5987,7 @@ static int log_conflicting_inodes(struct btrfs_trans_handle *trans,
 			break;
 	}
 
+	ctx->log_new_dentries = orig_log_new_dentries;
 	ctx->logging_conflict_inodes = false;
 	if (ret)
 		free_conflicting_inodes(ctx);
