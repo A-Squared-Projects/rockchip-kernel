@@ -602,6 +602,28 @@ The two halves are bisected separately:
   config, the Rockchip hardware RNG driver being off, is fixed too
   (8c618fec6d9, see 3.3) but was not the cause.
 
+  With the queue fix the 6.6 image boots (console-attended): rkflash
+  registers, dm-verity mounts the root, init runs, and **the SDIO card
+  attaches first time with no -110**: 400 kHz at 0.730 s, 50 MHz at
+  0.760 s, "new high speed SDIO card" at 0.762 s, wlan0 with the chip's
+  own MAC. One boot, not a rate, but on a kernel 95k commits after
+  6.1 and 113k before the pre-merge tree, a first-attempt attach
+  points the larger loss of margin at the 6.6-to-6.12.69 half. The
+  attach sits at 0.76 s here against 1.07 s on the port; the whole
+  boot is earlier. The twelve boots wait on a new blocker: vendor
+  storage. The console shows "flash vendor storage:20170308 ret = -1",
+  which is noise (that driver only serves SFC NOR and prints -1 on
+  every SFC NAND kernel, 6.12 included); the line that matters is
+  "rkflashd vendor storage init ok/failed" from the SFTL path, not yet
+  read. Downstream, `vendor-serial` returns nothing, so S23 halts the
+  boot before ssh, the device key is not found, and the RTL8152 gets
+  no MAC. The kernel side of that path (rkflash, SFTL blob, sfc,
+  rk_vendor_storage) is now identical to the port's apart from the
+  block API, after carrying the SFC unaligned-access check (5d36ec40bf0)
+  that develop-6.6 predates; the 8250 LSR diagnostic drop is carried
+  too so the console is readable. Branch tip 45d48c1150a, rebuilt,
+  not yet rebooted.
+
   Two rules from this. Every branch states whether it is expected to
   reach sshd, and a tree from a new vendor base does not go on a bench
   unit until it has booted somewhere: a boot on the layer's QEMU
