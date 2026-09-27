@@ -1,18 +1,23 @@
-Linux kernel
-============
+Archive of the diagnostic branches from the RK3308 6.1 -> 6.12 port
+(docs/kernel-6.12-port.md on rithum-6.12, sections 4.2 and 10).
 
-There are several guides for kernel developers and users. These guides can
-be rendered in a number of formats, like HTML and PDF. Please read
-Documentation/admin-guide/README.rst first.
+This commit has no content of its own. Its parents are the tips of the
+branches below, so every commit those branches held stays reachable
+after the branches themselves were deleted. Check any of them out by
+hash. None of these trees is to ship.
 
-In order to build the documentation, use ``make htmldocs`` or
-``make pdfdocs``.  The formatted documentation can also be read online at:
+  a2c8bbcd0be  claude/bisect-6.12.80            pre-merge 6.12.69 + v6.12.80 + GT911 guard
+  818307b7b44  claude/bisect-6.12.90            pre-merge 6.12.69 + v6.12.90 + GT911 guard       8 of 12
+  8b433a4890f  claude/bisect-6.12.100           pre-merge 6.12.69 + v6.12.100 + GT911 guard      4 of 12
+  52b828114cc  claude/bisect-pre-merge-6.12.69  develop-6.12 tip + rithum carry-over, no stable    7 of 12
+  08bc7102c28  claude/bisect-pre-merge-plus-rithum  pre-merge + every post-merge rithum commit    10 of 12
+  b18a364c1f3  claude/exp-no-cpufreq            port with CPU_FREQ off                            4 of 12
+  d9e24787603  claude/exp-revert-probe-ready    port with 88e338bd9b6 reverted                    2 of 12
+  7d09ea1c43d  claude/exp-revert-mmc-bh         6.12.69 control + dw_mmc back on tasklet          never run
+  d78c27ea1a2  claude/exp-sync-fixed-regulator  port with regulator-fixed probing synchronously  12 of 12
+  e8c0e241870  claude/fix-sdio-iodomain-order   port + vqmmc-supply + synchronous regulator-fixed 12 of 12
+  bf7f3c2dbd9  claude/fix-sdio-vqmmc-only       port + vqmmc-supply only                          12 of 12
 
-    https://www.kernel.org/doc/html/latest/
-
-There are various text files in the Documentation/ subdirectory,
-several of them using the reStructuredText markup notation.
-
-Please read the Documentation/process/changes.rst file, as it contains the
-requirements for building and running the kernel, and information about
-the problems which may result by upgrading your kernel.
+Kept as branches: rithum-6.12 (the port), claude/bisect-6.6 (develop-6.6
+made bootable, 13 of 17, nearest fallback base), claude/port-findings
+(the document and the regulator debug-list fix on a rithum-6.1 base).
