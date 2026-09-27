@@ -452,29 +452,47 @@ same round:
   twelve or more boots before it means anything. F3 (audio) dropped as
   low value.
 
-Where that leaves it. Everything readable from software is identical
-or non-discriminating: registers, clocks, pins, configs, bus rate,
-timing mode, sample phase, settling time, carried card state, probe
-order, host index, Bluetooth, USB overlap, dmesg concurrency, switched
-loads, and the NAND overlap. One readable thing has not been compared:
-the GPIO controllers themselves. CRU, GRF and dw_mmc were dumped, but
-not the five GPIO banks' data, direction and external-port registers
-(0xff220000 to 0xff260000, offsets 0x00, 0x04 and 0x50), nor
-`/sys/kernel/debug/gpio`. Pinmux and pull live in GRF and are known
-identical; the level each GPIO output is driven to is off-SoC physical
-state (panel, amplifier, touch reset, WL_REG_ON, BT_REG_ON, host-wake)
-and lives only there. That is the last software-side comparison; after
-it, the bench:
+The GPIO banks were the last software-readable state, and they are
+identical too (five sweeps per bank for volatility first; gpio0 and
+gpio1 EXT_PORT flicker on live inputs, every DR, DDR, INTEN and
+INT_TYPE word is stable). Every stable word matches between a 6.1
+passing boot and a port passing boot. The one difference is the
+failure's consequence: gpio0 DR bit 2 is WL_REG_ON, released on both
+passing boots and asserted only on the failing one, because the core
+powers the card off after "Failed to initialize", which asserts the
+pwrseq reset. The host-wake line is an input on both kernels (gpio0
+DDR bit 0 clear), so the port's claim of it drives nothing. Decoded
+and identical on both kernels: host-wake in/0, headphone amp out/0,
+WL_REG_ON out/1, speaker amp out/0, touch IRQ in/0, panel enable
+out/0, BT device-wake out/1, BT_REG_ON out/1.
+
+**The software side is finished.** Everything readable is identical or
+non-discriminating between a 6.1 passing boot and a port passing boot,
+and between a port passing boot and a port failing boot: every stable
+CRU, GRF, dw_mmc and GPIO word; every clock's rate, parent and enable
+count; SDIO pinmux and pinconf; the kernel config; the `&sdio` and
+`sdio_pwrseq` nodes; the probe timeline to within 1 ms; concurrent
+activity; the NAND overlap (present on 6.1 too); the switched loads;
+Bluetooth (seven seconds away); bus rate, timing mode, sample phase,
+settling time and carried card state. What the kernel does to the SoC
+is the same. What differs is what the card sees, and only an
+instrument can show that. The bench, which is the whole remaining
+programme:
 
 1. A scope on SDIO CLK and CMD across the switch out of the init rate,
    on a failing port boot and a passing 6.1 boot.
 2. On the same trigger, vcc_io and vcc_1v8 at the WiFi module over
-   1.05 to 1.25 s.
+   1.05 to 1.25 s, looking for droop coincident with the NAND reads.
 3. Repeated real power cycles on each image. One cold boot of E passed
    first time, which at E's 1-in-6 warm rate is what chance gives once.
 
+Until that is done, the port ships without WiFi being reliable, or it
+does not ship. A and C are not acceptable substitutes: they relocate
+the transaction and hide the fault.
+
 None of A to E, nor the `initcall_debug` builds, ship. They live on
-meta-rithum's local scratch branches marked diagnostic.
+meta-rithum's local scratch branches marked diagnostic; unit 0002 is on
+the unpatched port.
 
 ### 4.3 Audio codec: mainline refuses version B
 
@@ -717,10 +735,12 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   underflow` across the reboot loop; design the cookie capture the 6.1
   comment asks for.
 - WiFi SDIO is intermittent on 6.12 (4.2): 6.1 passes 6 of 6 on the
-  same unit, the port 1 of 6. The whole SDIO code path is diffed and
-  equivalent; the Bluetooth timing check and the 6.1 register snapshot
-  are the next two results. Experiment A is a workaround, not a fix.
-  This blocks calling the port done.
+  same unit, the port 1 of 6. The software side is exhausted: every
+  readable register, clock, pin, GPIO level, config and probe timeline
+  is identical between the kernels. It needs the bench (scope on CLK,
+  CMD and the module's rails across the clock switch; real power
+  cycles). The delay variants A and C are not fixes. This blocks
+  calling the port done.
 - The RS variant shares every fix here and has not been booted.
 - Branch naming: this is `claude/kernel-6-12-port-kg1g39`; it wants a
   `rithum-6.12` home.
