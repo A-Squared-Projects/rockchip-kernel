@@ -1164,7 +1164,7 @@ static int rockchip_spi_probe(struct platform_device *pdev)
 	if (device_property_read_bool(&pdev->dev, "rockchip,cs-inactive-disable"))
 		rs->cs_inactive = false;
 
-	ret = devm_spi_register_controller(&pdev->dev, ctlr);
+	ret = spi_register_controller(ctlr);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to register controller\n");
 		goto err_free_dma_rx;
@@ -1214,6 +1214,8 @@ static void rockchip_spi_remove(struct platform_device *pdev)
 		misc_deregister(&rs->miscdev);
 
 	pm_runtime_get_sync(&pdev->dev);
+
+	spi_unregister_controller(ctlr);
 
 	pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);

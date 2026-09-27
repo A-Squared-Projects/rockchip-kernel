@@ -1713,6 +1713,7 @@ static int rk808_regulator_probe(struct platform_device *pdev)
 	const struct regulator_desc *regulators;
 	int ret, i, nregulators;
 
+	device_set_of_node_from_dev(&pdev->dev, pdev->dev.parent);
 	pdata = devm_kzalloc(&pdev->dev, sizeof(*pdata), GFP_KERNEL);
 	if (!pdata)
 		return -ENOMEM;
