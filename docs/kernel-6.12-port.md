@@ -1843,7 +1843,10 @@ Keep merging stable ourselves; Rockchip's branch lags by months.
   on a unit with an unprogrammed LAN_MAC_ID, which needed a coupling
   fix because two constants used by the serial path were declared
   inside that guard.
-- The RS variant shares every fix here and has not been booted.
+- The RS variant (RithumSwitch-0148, 256 MB, DT model "Rithum Switch")
+  boots `rithum-6.12` at 99da68e5 from the layer's main to a passing
+  selftest (meta-rithum). Its WiFi rate on the fixed kernel has not
+  been measured separately; the DT it inherits is the same.
 - Branches: the port is `rithum-6.12`, a clean re-series with one
   documentation commit at the end. `claude/kernel-6-12-port-kg1g39` is
   the development branch with the full history, kept as the record
