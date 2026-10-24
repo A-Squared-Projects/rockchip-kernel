@@ -877,7 +877,7 @@ static const int rk3288_saved_cru_reg_ids[] = {
 
 static u32 rk3288_saved_cru_regs[ARRAY_SIZE(rk3288_saved_cru_reg_ids)];
 
-static int rk3288_clk_suspend(void)
+static int rk3288_clk_suspend(void *data)
 {
 	int i, reg_id;
 
@@ -912,7 +912,7 @@ static int rk3288_clk_suspend(void)
 	return 0;
 }
 
-static void rk3288_clk_resume(void)
+static void rk3288_clk_resume(void *data)
 {
 	int i, reg_id;
 
@@ -929,7 +929,7 @@ static void rk3288_clk_shutdown(void)
 	writel_relaxed(0xf3030000, rk3288_cru_base + RK3288_MODE_CON);
 }
 
-static struct syscore_ops rk3288_clk_syscore_ops = {
+static const struct syscore_ops rk3288_clk_syscore_ops = {
 	.suspend = rk3288_clk_suspend,
 	.resume = rk3288_clk_resume,
 };
@@ -943,6 +943,10 @@ static void rk3288_dump_cru(void)
 			       0x21c, false);
 	}
 }
+
+static struct syscore rk3288_clk_syscore = {
+	.ops = &rk3288_clk_syscore_ops,
+};
 
 static void __init rk3288_common_init(struct device_node *np,
 				      enum rk3288_variant soc)
@@ -993,7 +997,7 @@ static void __init rk3288_common_init(struct device_node *np,
 					   rk3288_clk_shutdown);
 
 	if (!psci_smp_available())
-		register_syscore_ops(&rk3288_clk_syscore_ops);
+		register_syscore(&rk3288_clk_syscore);
 
 	rockchip_clk_of_add_provider(np, ctx);
 
