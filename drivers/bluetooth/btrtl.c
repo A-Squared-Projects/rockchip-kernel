@@ -7,6 +7,7 @@
 
 #include <linux/module.h>
 #include <linux/firmware.h>
+#include <linux/soc/rockchip/rk_vendor_storage.h>
 #include <linux/unaligned.h>
 #include <linux/usb.h>
 
@@ -32,6 +33,7 @@
 #define RTL_ROM_LMP_8851B	0x8851
 #define RTL_ROM_LMP_8922A	0x8922
 #define RTL_CONFIG_MAGIC	0x8723ab55
+#define RTL_CONFIG_BDADDR	0x0044	/* where an 8723D config holds the address */
 
 #define RTL_VSC_OP_COREDUMP	0xfcff
 
@@ -904,6 +906,77 @@ static int rtl_load_file(struct hci_dev *hdev, const char *name, u8 **buff)
 	return ret;
 }
 
+/*
+ * A Rockchip board keeps each unit's BD address in vendor storage, and an
+ * 8723D takes its address only from the config downloaded with its firmware;
+ * there is no command to set it afterwards. So the stored address goes into
+ * that config here, in memory, and the config itself comes unmodified from
+ * the firmware directory. Nothing happens when no address is stored.
+ */
+static void btrtl_vendor_bdaddr(struct hci_dev *hdev,
+				struct btrtl_device_info *btrtl_dev)
+{
+	struct rtl_vendor_config *config;
+	struct rtl_vendor_config_entry *entry;
+	u8 addr[6], *data = NULL, *grown;
+	int i, total;
+
+	if (btrtl_dev->ic_info->lmp_subver != RTL_ROM_LMP_8723B ||
+	    btrtl_dev->ic_info->hci_rev != 0xd)
+		return;
+	if (rk_vendor_read(BT_MAC_ID, addr, sizeof(addr)) < (int)sizeof(addr) ||
+	    !memchr_inv(addr, 0x00, sizeof(addr)) ||
+	    !memchr_inv(addr, 0xff, sizeof(addr)))
+		return;
+
+	if (btrtl_dev->cfg_len < (int)sizeof(*config))
+		return;
+	config = (struct rtl_vendor_config *)btrtl_dev->cfg_data;
+	if (le32_to_cpu(config->signature) != RTL_CONFIG_MAGIC)
+		return;
+	total = le16_to_cpu(config->total_len);
+	if (total + (int)sizeof(*config) > btrtl_dev->cfg_len)
+		return;
+
+	for (i = 0; i + (int)sizeof(*entry) <= total; i += sizeof(*entry) + entry->len) {
+		entry = (struct rtl_vendor_config_entry *)&config->entry[i];
+		if (i + (int)sizeof(*entry) + entry->len > total)
+			return;
+		if (le16_to_cpu(entry->offset) == RTL_CONFIG_BDADDR) {
+			if (entry->len != sizeof(addr))
+				return;
+			data = entry->data;
+			break;
+		}
+	}
+
+	/* No address entry: append one, which only fits where the declared
+	 * entries end the file. */
+	if (!data) {
+		if (total + (int)sizeof(*config) != btrtl_dev->cfg_len)
+			return;
+		grown = kvmalloc(btrtl_dev->cfg_len + sizeof(*entry) + sizeof(addr),
+				 GFP_KERNEL);
+		if (!grown)
+			return;
+		memcpy(grown, btrtl_dev->cfg_data, btrtl_dev->cfg_len);
+		kvfree(btrtl_dev->cfg_data);
+		btrtl_dev->cfg_data = grown;
+		config = (struct rtl_vendor_config *)grown;
+		entry = (struct rtl_vendor_config_entry *)&config->entry[total];
+		entry->offset = cpu_to_le16(RTL_CONFIG_BDADDR);
+		entry->len = sizeof(addr);
+		data = entry->data;
+		btrtl_dev->cfg_len += sizeof(*entry) + sizeof(addr);
+		config->total_len = cpu_to_le16(total + sizeof(*entry) + sizeof(addr));
+	}
+
+	/* Stored first octet first; the config wants it last. */
+	for (i = 0; i < (int)sizeof(addr); i++)
+		data[i] = addr[sizeof(addr) - 1 - i];
+	rtl_dev_info(hdev, "BD address %pMR from vendor storage", data);
+}
+
 static int btrtl_setup_rtl8723a(struct hci_dev *hdev,
 				struct btrtl_device_info *btrtl_dev)
 {
@@ -1234,6 +1307,8 @@ next:
 				ret = -EINVAL;
 			goto err_free;
 		}
+		if (btrtl_dev->cfg_len > 0)
+			btrtl_vendor_bdaddr(hdev, btrtl_dev);
 	}
 
 	/* The following chips supports the Microsoft vendor extension,
