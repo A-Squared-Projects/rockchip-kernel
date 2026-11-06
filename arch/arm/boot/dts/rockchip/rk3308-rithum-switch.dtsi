@@ -459,6 +459,22 @@
 	status = "okay";
 };
 
+/*
+ * Production has no serial console at all, not merely a dead one: the kernel
+ * console is ttynull, with no earlycon, and the FIQ debugger is off, so
+ * nothing drives UART2 or listens on it before the SD controller takes the
+ * pins. rk3308-rithum-switch-bench.dtsi puts both back with its 1-bit bus.
+ */
+&fiq_debugger {
+	status = "disabled";
+};
+
+/ {
+	chosen {
+		bootargs = "console=ttynull root=PARTUUID=614e0000-0000 rootfstype=squashfs rootwait snd_aloop.index=7 snd_aloop.use_raw_jiffies=1";
+	};
+};
+
 &vop {
 	status = "okay";
 };
