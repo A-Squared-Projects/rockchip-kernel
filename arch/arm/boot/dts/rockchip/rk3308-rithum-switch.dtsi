@@ -433,6 +433,14 @@
 
 &route_rgb {
 	status = "okay";
+	/*
+	 * One logo for u-boot and the kernel's loader-logo handoff alike: u-boot
+	 * scans out logo.bmp and hands that same buffer to the kernel, so a
+	 * second copy (rk3308.dtsi's logo_kernel.bmp) only costs boot-partition
+	 * space. A verified "logo" partition supplies it, when present, under
+	 * this name.
+	 */
+	logo,kernel = "logo.bmp";
 };
 
 /*
