@@ -372,6 +372,16 @@
 	dr_mode = "peripheral";
 };
 
+/*
+ * VBUS on the ADB port is always present while the unit runs: the board
+ * supplies it internally on external power, and on USB power alone pulling
+ * the cable powers the unit off. bvalid therefore says nothing about the
+ * cable, so the PHY does no VBUS detection or charger detection on this port.
+ */
+&u2phy_otg {
+	rockchip,vbus-always-on;
+};
+
 &i2c1 {
 	gt9xx: touchscreen@5d {
 		compatible = "goodix,gt9xx";
