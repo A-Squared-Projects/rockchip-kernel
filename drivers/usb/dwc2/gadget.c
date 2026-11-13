@@ -4556,6 +4556,59 @@ static void dwc2_hsotg_init(struct dwc2_hsotg *hsotg)
 		dwc2_set_bit(hsotg, GAHBCFG, GAHBCFG_DMA_EN);
 }
 
+/*
+ * Where the board holds VBUS, a host going away is never a session end: the
+ * core sees the bus go idle and flags a suspend. Now and then it misses that,
+ * and stays connected with the frame number stopped, no suspend and no further
+ * interrupts, so it never sees the host's next reset either. A configured
+ * device whose frame number has not moved across two polls, with no suspend,
+ * is in that state; reconnecting it, as a pullup off and on does, recovers it.
+ */
+#define DWC2_STALL_POLL_MS	1000
+
+static void dwc2_hsotg_stall_work(struct work_struct *work)
+{
+	struct dwc2_hsotg *hsotg = container_of(to_delayed_work(work),
+						struct dwc2_hsotg, stall_work);
+	unsigned long flags;
+	u32 dsts;
+	u16 frameno;
+
+	spin_lock_irqsave(&hsotg->lock, flags);
+
+	if (!hsotg->enabled || !hsotg->connected ||
+	    hsotg->op_state != OTG_STATE_B_PERIPHERAL ||
+	    hsotg->lx_state != DWC2_L0 ||
+	    hsotg->gadget.state != USB_STATE_CONFIGURED) {
+		hsotg->stall_count = 0;
+		goto out;
+	}
+
+	dsts = dwc2_readl(hsotg, DSTS);
+	frameno = (dsts & DSTS_SOFFN_MASK) >> DSTS_SOFFN_SHIFT;
+	if (dsts & DSTS_SUSPSTS || frameno != hsotg->stall_frameno)
+		hsotg->stall_count = 0;
+	else
+		hsotg->stall_count++;
+	hsotg->stall_frameno = frameno;
+
+	if (hsotg->stall_count >= 2) {
+		dev_warn(hsotg->dev,
+			 "frame number stopped without a suspend: reconnecting\n");
+		hsotg->stall_count = 0;
+		dwc2_hsotg_core_disconnect(hsotg);
+		dwc2_hsotg_disconnect(hsotg);
+		hsotg->gadget.speed = USB_SPEED_UNKNOWN;
+		dwc2_hsotg_core_init_disconnected(hsotg, false);
+		dwc2_hsotg_core_connect(hsotg);
+	}
+
+out:
+	spin_unlock_irqrestore(&hsotg->lock, flags);
+	schedule_delayed_work(&hsotg->stall_work,
+			      msecs_to_jiffies(DWC2_STALL_POLL_MS));
+}
+
 /**
  * dwc2_hsotg_udc_start - prepare the udc for work
  * @gadget: The usb gadget state
@@ -4619,10 +4672,14 @@ static int dwc2_hsotg_udc_start(struct usb_gadget *gadget,
 	}
 
 	hsotg->enabled = 0;
+	hsotg->stall_count = 0;
 	spin_unlock_irqrestore(&hsotg->lock, flags);
 
 	gadget->sg_supported = using_desc_dma(hsotg);
 	dev_info(hsotg->dev, "bound driver %s\n", driver->driver.name);
+
+	schedule_delayed_work(&hsotg->stall_work,
+			      msecs_to_jiffies(DWC2_STALL_POLL_MS));
 
 	return 0;
 
@@ -4645,6 +4702,8 @@ static int dwc2_hsotg_udc_stop(struct usb_gadget *gadget)
 
 	if (!hsotg)
 		return -ENODEV;
+
+	cancel_delayed_work_sync(&hsotg->stall_work);
 
 	/* Exit clock gating when driver is stopped. */
 	if (hsotg->params.power_down == DWC2_POWER_DOWN_PARAM_NONE &&
@@ -5062,6 +5121,8 @@ int dwc2_gadget_init(struct dwc2_hsotg *hsotg)
 		hsotg->gadget.max_speed = USB_SPEED_HIGH;
 		break;
 	}
+
+	INIT_DELAYED_WORK(&hsotg->stall_work, dwc2_hsotg_stall_work);
 
 	hsotg->gadget.ops = &dwc2_hsotg_gadget_ops;
 	hsotg->gadget.name = dev_name(dev);
