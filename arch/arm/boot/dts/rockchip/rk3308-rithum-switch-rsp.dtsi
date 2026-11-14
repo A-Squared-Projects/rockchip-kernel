@@ -22,6 +22,33 @@
 	pinctrl-0 = <&usb_drv &rmii_drv>;
 };
 
+/ {
+	aliases {
+		ethernet0 = &ethernet;
+	};
+};
+
+/*
+ * The RTL8152, on the EHCI's root port 1. Its network interface hangs off
+ * USB interface 0 of configuration 1, so that is the node the alias names.
+ */
+&usb_host0_ehci {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	ethernet@1 {
+		compatible = "usbbda,8152";
+		reg = <1>;
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		ethernet: interface@0 {
+			compatible = "usbifbda,8152.config1.0";
+			reg = <0 1>;
+		};
+	};
+};
+
 /*
  * Panel power rail pin, present on the Pro only. Keep the base dtsi's
  * spi_init_cmd in the list (pinctrl-0 replaces, not extends) or the
