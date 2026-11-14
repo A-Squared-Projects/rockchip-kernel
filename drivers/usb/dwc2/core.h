@@ -876,6 +876,8 @@ struct dwc2_hregs_backup {
  * @phy_off_for_suspend: Status of whether we turned the PHY off at suspend.
  * @need_phy_for_wake:	Quirk saying that we should keep the PHY on at
  *			suspend if we need USB to wake us up.
+ * @frame_stall_reconnect: Reconnect a configured gadget whose frame number
+ *			stops without a suspend (the board holds VBUS).
  * @frame_number:       Frame number read from the core. For both device
  *			and host modes. The value ranges are from 0
  *			to HFNUM_MAX_FRNUM.
@@ -1072,6 +1074,7 @@ struct dwc2_hsotg {
 	bool bus_suspended;
 	unsigned int reset_phy_on_wake:1;
 	unsigned int need_phy_for_wake:1;
+	unsigned int frame_stall_reconnect:1;
 	unsigned int phy_off_for_suspend:1;
 	u16 frame_number;
 

@@ -4557,6 +4557,8 @@ static void dwc2_hsotg_init(struct dwc2_hsotg *hsotg)
 }
 
 /*
+ * Enabled by snps,frame-stall-reconnect.
+ *
  * Where the board holds VBUS, a host going away is never a session end: the
  * core sees the bus go idle and flags a suspend. Now and then it misses that,
  * and stays connected with the frame number stopped, no suspend and no further
@@ -4678,8 +4680,9 @@ static int dwc2_hsotg_udc_start(struct usb_gadget *gadget,
 	gadget->sg_supported = using_desc_dma(hsotg);
 	dev_info(hsotg->dev, "bound driver %s\n", driver->driver.name);
 
-	schedule_delayed_work(&hsotg->stall_work,
-			      msecs_to_jiffies(DWC2_STALL_POLL_MS));
+	if (hsotg->frame_stall_reconnect)
+		schedule_delayed_work(&hsotg->stall_work,
+				      msecs_to_jiffies(DWC2_STALL_POLL_MS));
 
 	return 0;
 

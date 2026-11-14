@@ -548,6 +548,10 @@ static int dwc2_driver_probe(struct platform_device *dev)
 		of_property_read_bool(dev->dev.of_node,
 				      "snps,need-phy-for-wake");
 
+	hsotg->frame_stall_reconnect =
+		of_property_read_bool(dev->dev.of_node,
+				      "snps,frame-stall-reconnect");
+
 	/*
 	 * Before performing any core related operations
 	 * check core version.
