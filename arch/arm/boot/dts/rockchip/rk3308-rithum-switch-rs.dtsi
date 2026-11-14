@@ -25,3 +25,11 @@
 		};
 	};
 };
+
+/* The RS has no ethernet and no RS485 port. */
+/ {
+	aliases {
+		/delete-property/ ethernet0;
+		/delete-property/ serial0;
+	};
+};

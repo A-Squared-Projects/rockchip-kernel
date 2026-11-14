@@ -385,9 +385,22 @@
 	rockchip,vbus-always-on;
 };
 
+/*
+ * Aliases for controllers no variant enables go, so the alias list names only
+ * what is there. serial2 stays: the FIQ debugger finds the UART it drives,
+ * which must be disabled, by matching rockchip,serial-id against the serial
+ * aliases.
+ */
 / {
 	aliases {
 		wifi0 = &wifi;
+		/delete-property/ i2c0;
+		/delete-property/ i2c3;
+		/delete-property/ serial1;
+		/delete-property/ serial3;
+		/delete-property/ spi0;
+		/delete-property/ spi1;
+		/delete-property/ spi2;
 	};
 };
 
