@@ -366,10 +366,13 @@
  * The dwc2 OTG port is the ADB port (device-mode to a host PC); the
  * RTL8152 ethernet and other USB live on the EHCI/OHCI host controllers.
  * In "otg" mode with no ID/role signal dwc2 defaults to host, so the ADB
- * gadget never enumerates - force peripheral.
+ * gadget never enumerates - force peripheral. VBUS is held (see &u2phy_otg),
+ * so the core occasionally misses a host going away; frame-stall-reconnect
+ * recovers it.
  */
 &usb20_otg {
 	dr_mode = "peripheral";
+	snps,frame-stall-reconnect;
 };
 
 /*
