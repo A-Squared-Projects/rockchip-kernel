@@ -33,7 +33,7 @@
 };
 
 &thermal_zones {
-	soc-thermal {
+	cpu-thermal {
 		sustainable-power = <422>;
 		rk3308bs-sustainable-power = <363>;
 		k_pu = <6>;
