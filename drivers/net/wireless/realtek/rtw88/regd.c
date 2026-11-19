@@ -427,10 +427,6 @@ int rtw_regd_init(struct rtw_dev *rtwdev)
 		rtwdev->regd.state = RTW_REGD_STATE_WORLDWIDE;
 	}
 
-	/* A beacon hint would lift NO-IR on channels the domain keeps passive. */
-	if (rtw_regd_param_set())
-		wiphy->regulatory_flags |= REGULATORY_DISABLE_BEACON_HINTS;
-
 	rtwdev->regd.regulatory = &rtw_reg_ww;
 	rtwdev->regd.dfs_region = NL80211_DFS_UNSET;
 	rtw_dbg_regd_dump(rtwdev, "regd init state %d: ", rtwdev->regd.state);
