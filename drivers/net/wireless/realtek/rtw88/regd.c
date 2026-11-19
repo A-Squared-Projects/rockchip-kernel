@@ -33,6 +33,66 @@ do {								\
 static const struct rtw_regulatory rtw_reg_ww =
 	COUNTRY_REGD_ENT("00", RTW_REGD_WW, RTW_REGD_WW);
 
+/* The platform's regulatory region, for a module with no country in its
+ * efuse. regd_2g_max is a ceiling: the 2.4 GHz channels above it are disabled
+ * in orig_flags, which cfg80211 builds every update on, so user hints,
+ * country IEs and the database all land within it. regd_country is hinted to
+ * cfg80211 as the starting domain; "00" leaves it at the world domain.
+ */
+static char rtw_regd_country[3];
+module_param_string(regd_country, rtw_regd_country, sizeof(rtw_regd_country),
+		    0444);
+MODULE_PARM_DESC(regd_country,
+		 "Starting country, ISO 3166 alpha2 or 00 for world (requires regd_2g_max)");
+
+static uint rtw_regd_2g_max;
+module_param_named(regd_2g_max, rtw_regd_2g_max, uint, 0444);
+MODULE_PARM_DESC(regd_2g_max,
+		 "Highest 2.4 GHz channel any regulatory domain may enable: 11 or 13");
+
+static bool rtw_regd_param_set(void)
+{
+	return rtw_regd_country[0] || rtw_regd_2g_max;
+}
+
+static bool rtw_regd_param_is_ww(void)
+{
+	return rtw_regd_country[0] == '0' && rtw_regd_country[1] == '0';
+}
+
+static bool rtw_regd_param_valid(void)
+{
+	const char *c = rtw_regd_country;
+
+	if (rtw_regd_2g_max != 11 && rtw_regd_2g_max != 13)
+		return false;
+	if (rtw_regd_param_is_ww())
+		return true;
+	return c[0] >= 'A' && c[0] <= 'Z' && c[1] >= 'A' && c[1] <= 'Z';
+}
+
+static void rtw_regd_apply_2g_max(struct wiphy *wiphy)
+{
+	struct ieee80211_supported_band *sband;
+	struct ieee80211_channel *ch;
+	int i;
+
+	if (!rtw_regd_2g_max)
+		return;
+
+	sband = wiphy->bands[NL80211_BAND_2GHZ];
+	if (!sband)
+		return;
+
+	for (i = 0; i < sband->n_channels; i++) {
+		ch = &sband->channels[i];
+		if (ch->hw_value > rtw_regd_2g_max) {
+			ch->orig_flags |= IEEE80211_CHAN_DISABLED;
+			ch->flags |= IEEE80211_CHAN_DISABLED;
+		}
+	}
+}
+
 static const struct rtw_regulatory rtw_reg_map[] = {
 	COUNTRY_REGD_ENT("AD", RTW_REGD_ETSI, RTW_REGD_ETSI),
 	COUNTRY_REGD_ENT("AE", RTW_REGD_ETSI, RTW_REGD_ETSI),
@@ -343,8 +403,18 @@ int rtw_regd_init(struct rtw_dev *rtwdev)
 
 	wiphy->reg_notifier = rtw_regd_notifier;
 
+	if (rtw_regd_param_set()) {
+		if (!rtw_regd_param_valid()) {
+			rtw_err(rtwdev, "invalid regd_country \"%s\" regd_2g_max %u\n",
+				rtw_regd_country, rtw_regd_2g_max);
+			return -EINVAL;
+		}
+		rtw_info(rtwdev, "region %s set by platform, 2.4 GHz channels 1-%u\n",
+			 rtw_regd_country, rtw_regd_2g_max);
+	}
+
 	chip_reg = rtw_reg_find_by_name(rtwdev->efuse.country_code);
-	if (!rtw_reg_is_ww(chip_reg)) {
+	if (!rtw_reg_is_ww(chip_reg) && !rtw_regd_param_set()) {
 		rtwdev->regd.state = RTW_REGD_STATE_PROGRAMMED;
 
 		/* Set REGULATORY_STRICT_REG before ieee80211_register_hw(),
@@ -357,11 +427,16 @@ int rtw_regd_init(struct rtw_dev *rtwdev)
 		rtwdev->regd.state = RTW_REGD_STATE_WORLDWIDE;
 	}
 
+	/* A beacon hint would lift NO-IR on channels the domain keeps passive. */
+	if (rtw_regd_param_set())
+		wiphy->regulatory_flags |= REGULATORY_DISABLE_BEACON_HINTS;
+
 	rtwdev->regd.regulatory = &rtw_reg_ww;
 	rtwdev->regd.dfs_region = NL80211_DFS_UNSET;
 	rtw_dbg_regd_dump(rtwdev, "regd init state %d: ", rtwdev->regd.state);
 
 	rtw_regd_apply_hw_cap_flags(wiphy);
+	rtw_regd_apply_2g_max(wiphy);
 	return 0;
 }
 
@@ -381,6 +456,13 @@ int rtw_regd_hint(struct rtw_dev *rtwdev)
 			rtwdev->efuse.country_code[1]);
 
 		ret = regulatory_hint(wiphy, rtwdev->efuse.country_code);
+		if (ret) {
+			rtw_warn(rtwdev,
+				 "failed to hint regulatory: %d\n", ret);
+			return ret;
+		}
+	} else if (rtw_regd_param_set() && !rtw_regd_param_is_ww()) {
+		ret = regulatory_hint(wiphy, rtw_regd_country);
 		if (ret) {
 			rtw_warn(rtwdev,
 				 "failed to hint regulatory: %d\n", ret);
